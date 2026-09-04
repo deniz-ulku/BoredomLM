@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Model checkpoints (large binary files)
+checkpoints/
+*.pt
+
+# Training outputs
+results/
+runs/
+
+# OS
+.DS_Store
+Thumbs.db
