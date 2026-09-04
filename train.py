@@ -206,6 +206,26 @@ class Config:
         "Spotify", "Discord", "Steam",
     ]
 
+    # Architecture: BoredomLM special sauce (all toggleable for experiments)
+    mtp_depth = 1                # multi-token prediction depth: 1 = off, 4 = predict next 4 tokens
+    mtp_weight = 0.1             # loss weight for the auxiliary future-token heads
+    use_diff_attn = False        # differential (noise-cancelling) attention
+    diff_lambda_init = 0.8       # initial lambda for differential attention
+    weight_tying = True          # tie lm_head to the embedding matrix
+
+    # Learning-rate schedule: "constant" (warmup then flat), "cosine", or "linear"
+    lr_schedule = "constant"
+
+    # Length-based curriculum: grow the context from short to full over training
+    curriculum = False
+    curriculum_min_len = 128
+    curriculum_ramp_steps = 2000
+
+    # Brain-scan dataset: record how the model learns (gradients, attention, probes)
+    brain_scan = False           # snapshot training internals every brain_scan_interval steps
+    brain_scan_interval = 500    # micro-steps between snapshots
+    brain_scan_probes = 8        # number of fixed prompts tracked per snapshot
+
 
 config = Config()
 
@@ -244,6 +264,10 @@ class Attention(nn.Module):
         self.k_proj = nn.Linear(config.dim, config.dim, bias=False)
         self.v_proj = nn.Linear(config.dim, config.dim, bias=False)
         self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
+        if config.use_diff_attn:
+            # Per-head learnable lambda: how strongly the second (noise) attention
+            # map is subtracted. Init per the Diff Transformer paper (Ye et al. 2024).
+            self.lambda_ = nn.Parameter(torch.full((self.n_heads,), float(config.diff_lambda_init)))
 
     def forward(self, x):
         B, T, C = x.shape
@@ -253,6 +277,19 @@ class Attention(nn.Module):
 
         q = self.rotary(q)
         k = self.rotary(k)
+
+        if self.config.use_diff_attn:
+            # Differential attention: (softmax(Q1.K1) - lambda * softmax(Q2.K2)) V
+            # Two SDPA calls at half the head dim => same FLOPs as standard attention.
+            q1, q2 = q.chunk(2, dim=-1)
+            k1, k2 = k.chunk(2, dim=-1)
+            vt = v.transpose(1, 2)
+            out1 = F.scaled_dot_product_attention(q1.transpose(1, 2), k1.transpose(1, 2), vt, is_causal=True)
+            out2 = F.scaled_dot_product_attention(q2.transpose(1, 2), k2.transpose(1, 2), vt, is_causal=True)
+            lam = self.lambda_.view(1, -1, 1, 1)
+            out = out1 - lam * out2
+            out = out.transpose(1, 2).contiguous().view(B, T, C)
+            return self.o_proj(out)
 
         if self.config.use_flash_attention:
             try:
@@ -299,7 +336,14 @@ class Transformer3B(nn.Module):
         ])
         self.ln_f = nn.LayerNorm(config.dim)
         self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
-        self.lm_head.weight = self.embed.weight  # weight tying
+        if config.weight_tying:
+            self.lm_head.weight = self.embed.weight  # weight tying
+        # Multi-token prediction heads: predict tokens t+2 .. t+mtp_depth.
+        # Each head is a tiny dim->dim projection that reuses the shared lm_head,
+        # so it adds almost no parameters (and zero vocab-sized tensors).
+        n_mtp = max(0, config.mtp_depth - 1)
+        self.mtp_proj = nn.ModuleList([nn.Linear(config.dim, config.dim, bias=False) for _ in range(n_mtp)])
+        self.mtp_norm = nn.ModuleList([nn.LayerNorm(config.dim) for _ in range(n_mtp)])
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -323,6 +367,18 @@ class Transformer3B(nn.Module):
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1),
                                    ignore_index=-100)
+            # Multi-token prediction: also predict tokens 2..mtp_depth steps ahead
+            # using shared heads, forcing future-aware features (DeepSeek-V3 / Meta 2024).
+            if self.training and self.config.mtp_depth > 1:
+                for k in range(1, self.config.mtp_depth):
+                    h = x + self.mtp_proj[k - 1](self.mtp_norm[k - 1](x))
+                    logits_k = self.lm_head(h)
+                    loss_k = F.cross_entropy(
+                        logits_k[:, :-k].reshape(-1, logits_k.size(-1)),
+                        targets[:, k:].reshape(-1),
+                        ignore_index=-100,
+                    )
+                    loss = loss + self.config.mtp_weight * loss_k
         return logits, loss
 
     @torch.no_grad()
@@ -356,10 +412,32 @@ class Transformer3B(nn.Module):
 # ----------------------------------------------------------------------
 # HELPERS
 # ----------------------------------------------------------------------
+def _get_lr(step, cfg):
+    """LR for a given config: warmup, then constant / cosine / linear decay."""
+    if step < cfg.warmup_steps:
+        return cfg.learning_rate * (step + 1) / cfg.warmup_steps
+    if cfg.lr_schedule == "constant":
+        return cfg.learning_rate
+    progress = min(1.0, (step - cfg.warmup_steps) / max(1, cfg.total_steps - cfg.warmup_steps))
+    if cfg.lr_schedule == "cosine":
+        return cfg.learning_rate * 0.5 * (1.0 + math.cos(math.pi * progress))
+    if cfg.lr_schedule == "linear":
+        return cfg.learning_rate * (1.0 - progress)
+    return cfg.learning_rate
+
+
 def get_lr(step):
-    if step < config.warmup_steps:
-        return config.learning_rate * (step + 1) / config.warmup_steps
-    return config.learning_rate
+    return _get_lr(step, config)
+
+
+def _curriculum_len(step, cfg=None):
+    """Length-based curriculum: grow the context from min_len to seq_len."""
+    cfg = cfg or config
+    if not cfg.curriculum:
+        return cfg.seq_len
+    frac = min(1.0, step / max(1, cfg.curriculum_ramp_steps))
+    length = int(cfg.curriculum_min_len + (cfg.seq_len - cfg.curriculum_min_len) * frac)
+    return max(1, min(length, cfg.seq_len))
 
 
 def format_time(seconds):
@@ -638,6 +716,191 @@ def _evaluate(model, dataloader, n_batches, device):
         n += 1
     model.train()
     return total / n if n else float("nan")
+
+
+# ----------------------------------------------------------------------
+# BRAIN-SCAN (record how the model learns: gradients, activations, attention, probes)
+# ----------------------------------------------------------------------
+_BRAIN_PROBES = [
+    "The capital of France is",
+    "Once upon a time, there was a",
+    "The quick brown fox jumps over the",
+    "In a shocking turn of events, scientists discovered that",
+    "The best way to learn programming is to",
+    "A good story always begins with",
+    "The difference between a language model and a human is",
+    "If I had a million dollars, I would",
+]
+
+_BRAIN_FULL_PROBE = (
+    "The history of artificial intelligence began with myths and stories about "
+    "crafted beings. Modern research was founded at a workshop at Dartmouth College "
+    "in nineteen fifty six. Language models learn to predict the next word in a "
+    "sequence of text. As a model sees more data it gradually learns grammar, facts, "
+    "and reasoning. Training a large language model requires enormous amounts of "
+    "compute and high quality data. "
+)
+
+
+def _brain_probe_prompts(n=None):
+    """Deterministic list of probe prompts (seeded by config.seed)."""
+    prompts = list(_BRAIN_PROBES)
+    random.Random(config.seed).shuffle(prompts)
+    return prompts[: (n if n is not None else config.brain_scan_probes)]
+
+
+def _full_probe_batch(tokenizer, device, seq_len, target_len=None):
+    """A deterministic full-length (input, labels) probe batch."""
+    target_len = target_len or min(seq_len, 512)
+    ids = tokenizer(_BRAIN_FULL_PROBE)["input_ids"]
+    while len(ids) < target_len + 1:
+        ids = ids + tokenizer(_BRAIN_FULL_PROBE)["input_ids"]
+    block = ids[: target_len + 1]
+    return (torch.tensor(block[:-1], dtype=torch.long, device=device).unsqueeze(0),
+            torch.tensor(block[1:], dtype=torch.long, device=device).unsqueeze(0))
+
+
+def _downsample_2d(m, size=16):
+    """Mean-pool a square 2D tensor down to (size, size) on CPU."""
+    m = m.detach().float().cpu()
+    t = m.shape[0]
+    k = max(1, t // size)
+    t2 = k * size
+    return m[:t2, :t2].reshape(size, k, size, k).mean(dim=(1, 3))
+
+
+def _per_layer_grad_norms(model):
+    """Per-layer gradient L2 norm from current .grad tensors (no backward here)."""
+    norms = []
+    for layer in model.layers:
+        total = 0.0
+        for p in layer.parameters():
+            if p.grad is not None:
+                total += float((p.grad.detach().float() ** 2).sum())
+        norms.append(math.sqrt(total))
+    return norms
+
+
+def _capture_brain_snapshot(model, device, tokenizer, step, tokens_seen,
+                            train_loss, val_loss, perplexity, learning_rate):
+    """Record one brain-scan snapshot (gradients, activations, attention, probes)."""
+    scan_dir = os.path.join(config.results_dir, "brain_scan")
+    os.makedirs(scan_dir, exist_ok=True)
+    probes = _brain_probe_prompts()
+    n_layers = config.n_layers
+
+    model.eval()
+    act_norms = [0.0] * n_layers
+    attn_entropy = [0.0] * n_layers
+    attn_max = [0.0] * n_layers
+    attn_maps = []
+    hooks = []
+
+    def _block_hook(i):
+        def hook(module, inp, out):
+            act_norms[i] = float(out.detach().float().norm())
+        return hook
+
+    def _attn_hook(i):
+        def hook(module, inp, out):
+            x = inp[0]
+            B, T, C = x.shape
+            D = module.head_dim
+            with torch.no_grad():
+                q = module.q_proj(x).view(B, T, module.n_heads, D)
+                k = module.k_proj(x).view(B, T, module.n_heads, D)
+                q = module.rotary(q)
+                k = module.rotary(k)
+                scores = torch.einsum("bthd,bshd->bhts", q, k) / (D ** 0.5)
+                mask = torch.triu(torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=1)
+                scores = scores.masked_fill(mask, float("-inf"))
+                attn = torch.softmax(scores, dim=-1)
+                attn_entropy[i] = float(-(attn * torch.log(attn + 1e-12)).sum(-1).mean())
+                attn_max[i] = float(attn.max(-1).values.mean())
+                attn_maps.append(_downsample_2d(attn.mean(dim=(0, 1))))
+        return hook
+
+    for i, layer in enumerate(model.layers):
+        hooks.append(layer.register_forward_hook(_block_hook(i)))
+        hooks.append(layer.attn.register_forward_hook(_attn_hook(i)))
+
+    with torch.no_grad():
+        ids, _ = _full_probe_batch(tokenizer, device, config.seq_len)
+        model(ids)
+    for h in hooks:
+        h.remove()
+
+    probe_outputs = []
+    with torch.no_grad():
+        for p in probes:
+            enc = tokenizer(p, return_tensors="pt")["input_ids"].to(device)
+            out = model.generate(enc, max_new_tokens=32, temperature=0.8, top_p=0.9, do_sample=True)
+            probe_outputs.append(tokenizer.decode(out[0][enc.shape[1]:], skip_special_tokens=True))
+
+    model.train()
+    grad_norms = _per_layer_grad_norms(model)
+
+    step_tag = f"{int(step):07d}"
+    np_path = os.path.join(scan_dir, f"snapshot_{step_tag}.npz")
+    np.savez_compressed(
+        np_path,
+        step=np.asarray(step, dtype=np.int64),
+        tokens_seen=np.asarray(tokens_seen, dtype=np.int64),
+        train_loss=np.asarray(train_loss, dtype=np.float32),
+        val_loss=np.asarray(val_loss, dtype=np.float32),
+        perplexity=np.asarray(perplexity, dtype=np.float32),
+        learning_rate=np.asarray(learning_rate, dtype=np.float32),
+        grad_norm=np.asarray(grad_norms, dtype=np.float32),
+        act_norm=np.asarray(act_norms, dtype=np.float32),
+        attn_entropy=np.asarray(attn_entropy, dtype=np.float32),
+        attn_max=np.asarray(attn_max, dtype=np.float32),
+        attn_map=np.asarray([m.numpy() for m in attn_maps], dtype=np.float16),
+    )
+    json_path = os.path.join(scan_dir, f"probes_{step_tag}.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump([{"prompt": p, "output": o} for p, o in zip(probes, probe_outputs)], f, indent=2)
+    _write_brain_scan_readme(scan_dir)
+    print(f"[BRAIN-SCAN] snapshot {step_tag} -> {os.path.basename(np_path)} (+probes json)")
+
+
+def _write_brain_scan_readme(scan_dir):
+    schema = {
+        "description": "BoredomLM brain-scan: how a from-scratch LLM learns over training.",
+        "npz_fields": {
+            "step": "micro-step (int64)",
+            "tokens_seen": "tokens seen (int64)",
+            "train_loss": "training loss (float32)",
+            "val_loss": "validation loss (float32, NaN if unavailable)",
+            "perplexity": "validation perplexity (float32)",
+            "learning_rate": "learning rate (float32)",
+            "grad_norm": "[n_layers] per-layer gradient L2 norm (float32)",
+            "act_norm": "[n_layers] per-layer activation L2 norm (float32)",
+            "attn_entropy": "[n_layers] mean attention entropy (float32)",
+            "attn_max": "[n_layers] mean max attention probability (float32)",
+            "attn_map": "[n_layers, 16, 16] downsampled attention map (float16)",
+        },
+    }
+    with open(os.path.join(scan_dir, "schema.json"), "w") as f:
+        json.dump(schema, f, indent=2)
+    readme = (
+        "# BoredomLM Brain-Scan\n\n"
+        "A record of how a ~1.18B parameter language model, trained from scratch on a "
+        "single GPU, actually learns. Each snapshot captures per-layer gradient norms, "
+        "activation norms, attention entropy/max, downsampled attention maps, and probe "
+        "predictions, plus standard metrics.\n\n"
+        "## Format\n"
+        "- `snapshot_<step>.npz` — numeric arrays (see schema.json)\n"
+        "- `probes_<step>.json` — `[{prompt, output}, ...]`\n\n"
+        "## Loading\n"
+        "```python\n"
+        "import numpy as np\n"
+        "d = np.load('snapshot_0000000.npz')\n"
+        "print(d['grad_norm'])  # per-layer gradient norms\n"
+        "print(d['attn_map'])   # [n_layers, 16, 16] attention maps\n"
+        "```\n"
+    )
+    with open(os.path.join(scan_dir, "README.md"), "w", encoding="utf-8") as f:
+        f.write(readme)
 
 
 def _write_metrics_json(path, micro_step, optimizer_step, tokens_seen,
@@ -940,6 +1203,11 @@ def train(progress_callback=None):
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
 
+            if config.curriculum:
+                cur_len = _curriculum_len(step)
+                input_ids = input_ids[:, :cur_len]
+                labels = labels[:, :cur_len]
+
             logits, loss = model(input_ids, targets=labels)
             loss = loss / config.grad_accum_steps
             scaler.scale(loss).backward()
@@ -984,6 +1252,14 @@ def train(progress_callback=None):
                 else:
                     val_loss = float("nan")
                     perplexity = float("nan")
+
+                if config.brain_scan and (step + 1) % config.brain_scan_interval == 0:
+                    try:
+                        _capture_brain_snapshot(model, device, tokenizer, step + 1,
+                                                tokens_seen, avg_loss, val_loss,
+                                                perplexity, get_lr(step))
+                    except Exception as e:
+                        print(f"\n[WARN] Brain-scan snapshot failed ({e})")
 
                 gpu = _gpu_memory()
                 ma_tps = (sum(recent_tps) / len(recent_tps)) if recent_tps else 0.0
@@ -1269,6 +1545,20 @@ def chat():
 # ----------------------------------------------------------------------
 # AUTOMATIC EXPERIMENT REPORT
 # ----------------------------------------------------------------------
+def _render_report_md(report):
+    """Render the report dict as a simple Markdown document."""
+    lines = [f"# {report.get('experiment', 'Experiment')} Report",
+             "",
+             f"Generated: {report.get('generated_at', '')}",
+             ""]
+    for section in ("model", "training", "evaluation"):
+        lines.append(f"## {section.title()}")
+        for k, v in (report.get(section) or {}).items():
+            lines.append(f"- **{k}**: {v}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def generate_report():
     """Write results/report.json + results/report.md from measured data."""
     os.makedirs(config.results_dir, exist_ok=True)
@@ -1517,6 +1807,208 @@ def plot_metrics():
 
 
 # ----------------------------------------------------------------------
+# BRAIN-SCAN MODE (mode: brainscan)
+# ----------------------------------------------------------------------
+def brainscan():
+    """Analyze the latest checkpoint and write one brain-scan snapshot."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        amp_dtype = torch.float32
+
+    tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.model_max_length = int(1e9)
+
+    ckpt_path, step, state = find_latest_checkpoint()
+    if ckpt_path is None:
+        print("No checkpoint found. Run `python train.py train` first.")
+        return
+
+    model = Transformer3B(config)
+    if "model" in state:
+        model.load_state_dict(state["model"], strict=False)
+    else:
+        model.load_state_dict(state, strict=False)
+    tokens_seen = state.get("tokens_seen", 0)
+    state = None
+    import gc
+    gc.collect()
+
+    model = model.to(device=device, dtype=amp_dtype)
+
+    # Populate gradients with one backward pass so gradient norms can be recorded.
+    model.train()
+    ids, labels = _full_probe_batch(tokenizer, device, config.seq_len)
+    _, loss = model(ids, targets=labels)
+    loss.backward()
+
+    _capture_brain_snapshot(
+        model, device, tokenizer, step, tokens_seen,
+        train_loss=float(loss.item()), val_loss=float("nan"),
+        perplexity=float("nan"), learning_rate=0.0,
+    )
+    print("[INFO] Brain-scan snapshot written to results/brain_scan/")
+
+
+# ----------------------------------------------------------------------
+# TRAINING-TRICK EXPERIMENTS (mode: experiment)
+# ----------------------------------------------------------------------
+_EXPERIMENT_CONDITIONS = [
+    ("baseline",        {}),
+    ("mtp",             {"mtp_depth": 4}),
+    ("diff_attn",       {"use_diff_attn": True}),
+    ("cosine_lr",       {"lr_schedule": "cosine"}),
+    ("no_weight_tying", {"weight_tying": False}),
+    ("curriculum",      {"curriculum": True}),
+]
+
+
+class _ExperimentConfig:
+    """Small, fast model config used by the experiment harness."""
+    vocab_size = 50257
+    dim = 256
+    n_layers = 4
+    n_heads = 4
+    seq_len = 256
+    batch_size = 1
+    grad_accum_steps = 4
+    learning_rate = 3e-4
+    weight_decay = 0.1
+    warmup_steps = 50
+    total_steps = 300
+    gradient_checkpointing = False
+    use_flash_attention = False
+    compile_model = False
+    mtp_depth = 1
+    mtp_weight = 0.1
+    use_diff_attn = False
+    diff_lambda_init = 0.8
+    weight_tying = True
+    lr_schedule = "constant"
+    curriculum = False
+    curriculum_min_len = 64
+    curriculum_ramp_steps = 150
+    brain_scan = False
+
+
+def _experiment_blocks(tokenizer, seq_len, n_tokens=262144):
+    """Tokenize a small slice of the cached dataset (or synthetic fallback)."""
+    cache_key = config.dataset_name.replace("/", "_") + (f"_{config.dataset_config}" if config.dataset_config else "")
+    local_dir = os.path.join(DATA_DIR, cache_key)
+    files = sorted(glob.glob(os.path.join(local_dir, "**", "*.parquet"), recursive=True))
+    tokens = []
+    for f in files[:2]:
+        try:
+            pf = pq.ParquetFile(f)
+            for batch in pf.iter_batches(batch_size=64):
+                for text in batch["text"].to_pylist():
+                    tokens.extend(tokenizer(text or " ")["input_ids"])
+                    if len(tokens) >= n_tokens:
+                        break
+        except Exception:
+            pass
+        if len(tokens) >= n_tokens:
+            break
+    tokens = tokens[:n_tokens]
+    if len(tokens) < seq_len * 4:
+        text = ("the quick brown fox jumps over the lazy dog and runs away "
+                "language models learn from data to predict the next token ")
+        tokens = tokenizer(text)["input_ids"] * (n_tokens // 8 + 1)
+    blocks = []
+    for i in range(0, len(tokens) - seq_len, seq_len):
+        b = tokens[i:i + seq_len + 1]
+        if len(b) < seq_len + 1:
+            break
+        blocks.append((torch.tensor(b[:-1], dtype=torch.long),
+                       torch.tensor(b[1:], dtype=torch.long)))
+    return blocks
+
+
+def experiment():
+    """Train small model variants and report which training trick wins."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    amp_dtype = (torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+                 else (torch.float16 if torch.cuda.is_available() else torch.float32))
+    tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.model_max_length = int(1e9)
+
+    blocks = _experiment_blocks(tokenizer, _ExperimentConfig.seq_len)
+    if not blocks:
+        print("[ERROR] No experiment data available.")
+        return
+
+    rows = []
+    for name, overrides in _EXPERIMENT_CONDITIONS:
+        _seed_everything(config.seed)
+        cfg = _ExperimentConfig()
+        for k, v in overrides.items():
+            setattr(cfg, k, v)
+        model = Transformer3B(cfg).to(device=device, dtype=amp_dtype)
+        optimizer = AdamW8bit(model.parameters(), lr=cfg.learning_rate,
+                              weight_decay=cfg.weight_decay, betas=(0.9, 0.95))
+        scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and amp_dtype == torch.float16))
+        model.train()
+        running = 0.0
+        for step in tqdm(range(cfg.total_steps), desc=f"  {name:<16}", unit="step"):
+            for g in optimizer.param_groups:
+                g["lr"] = _get_lr(step, cfg)
+            inp, tgt = blocks[step % len(blocks)]
+            inp = inp.to(device)
+            tgt = tgt.to(device)
+            if cfg.curriculum:
+                cl = _curriculum_len(step, cfg)
+                inp = inp[:cl]
+                tgt = tgt[:cl]
+            _, loss = model(inp.unsqueeze(0), targets=tgt.unsqueeze(0))
+            loss = loss / cfg.grad_accum_steps
+            scaler.scale(loss).backward()
+            if (step + 1) % cfg.grad_accum_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+            running += loss.item() * cfg.grad_accum_steps
+        final_loss = running / cfg.total_steps
+
+        # Fair comparison: evaluate the MAIN next-token loss (no MTP auxiliary
+        # term) on held-out blocks the model never trained on.
+        model.eval()
+        eval_loss = 0.0
+        n_eval = min(64, max(1, len(blocks) - cfg.total_steps))
+        with torch.no_grad():
+            for j in range(n_eval):
+                inp, tgt = blocks[-(j + 1)]
+                inp = inp.to(device)
+                tgt = tgt.to(device)
+                _, l = model(inp.unsqueeze(0), targets=tgt.unsqueeze(0))
+                eval_loss += l.item()
+        eval_loss /= n_eval
+        rows.append((name, eval_loss))
+        del model, optimizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(f"[EXPERIMENT] {name:<16} train_loss={final_loss:.4f} eval_loss={eval_loss:.4f}")
+
+    baseline = dict(rows).get("baseline")
+    print("\n" + "=" * 60)
+    print("EXPERIMENT RESULTS (lower loss = better)")
+    print("=" * 60)
+    for name, loss in rows:
+        delta = loss - baseline if baseline is not None else 0.0
+        print(f"  {name:<16} loss={loss:.4f}  delta={delta:+.4f}")
+
+    os.makedirs(config.results_dir, exist_ok=True)
+    out = os.path.join(config.results_dir, "experiments.json")
+    with open(out, "w") as f:
+        json.dump([{"condition": n, "eval_loss": round(l, 4)} for n, l in rows], f, indent=2)
+    print(f"\n[INFO] Results written to {out}")
+
+
+# ----------------------------------------------------------------------
 # INTERACTIVE CONSOLE (no-arg mode)
 # ----------------------------------------------------------------------
 def show_metrics():
@@ -1552,15 +2044,17 @@ def interactive_menu():
     print("  BoredomLM-1.18B - interactive console")
     print("=" * 56)
     print("  commands:")
-    print("    train      start pretraining (resumes from checkpoint)")
-    print("    finetune   instruction fine-tune (SFT)")
-    print("    chat       chat with the fine-tuned model")
-    print("    evaluate   compare all checkpoints (validation loss)")
-    print("    plot       generate PNG plots from metrics")
-    print("    report     write results/report.json + report.md")
-    print("    metrics    show the latest training metrics")
-    print("    help       list commands")
-    print("    exit       quit")
+    print("    train       start pretraining (resumes from checkpoint)")
+    print("    finetune    instruction fine-tune (SFT)")
+    print("    chat        chat with the fine-tuned model")
+    print("    evaluate    compare all checkpoints (validation loss)")
+    print("    plot        generate PNG plots from metrics")
+    print("    report      write results/report.json + report.md")
+    print("    brainscan   record a brain-scan snapshot (gradients/attention)")
+    print("    experiment  train small variants and compare training tricks")
+    print("    metrics     show the latest training metrics")
+    print("    help        list commands")
+    print("    exit        quit")
     print("=" * 56)
     while True:
         try:
@@ -1574,7 +2068,7 @@ def interactive_menu():
         if not cmd:
             continue
         if cmd == "help":
-            print("  train / finetune / chat / evaluate / plot / report / metrics / help / exit")
+            print("  train / finetune / chat / evaluate / plot / report / brainscan / experiment / metrics / help / exit")
         elif cmd == "metrics":
             show_metrics()
         elif cmd == "train":
@@ -1589,6 +2083,10 @@ def interactive_menu():
             plot_metrics()
         elif cmd == "report":
             generate_report()
+        elif cmd == "brainscan":
+            brainscan()
+        elif cmd == "experiment":
+            experiment()
         else:
             print(f"  unknown command: {cmd} (type 'help')")
 
@@ -1596,7 +2094,7 @@ def interactive_menu():
 def main():
     parser = argparse.ArgumentParser(description="Single-file local LLM")
     parser.add_argument("mode", nargs="?", default=None,
-                        choices=["train", "finetune", "chat", "evaluate", "plot", "report"],
+                        choices=["train", "finetune", "chat", "evaluate", "plot", "report", "brainscan", "experiment"],
                         help="mode; if omitted, an interactive menu opens")
     args = parser.parse_args()
     if args.mode == "train":
@@ -1611,6 +2109,10 @@ def main():
         plot_metrics()
     elif args.mode == "report":
         generate_report()
+    elif args.mode == "brainscan":
+        brainscan()
+    elif args.mode == "experiment":
+        experiment()
     else:
         interactive_menu()
 
