@@ -31,7 +31,20 @@ LABEL = "candid-train"
 
 def _client():
     from vastai import VastAI
+    from vastai.api import client as vclient
 
+    # vastai calls Session.send() directly, which skips requests' environment CA settings.
+    # Honour REQUESTS_CA_BUNDLE so the SDK works behind TLS-inspecting proxies.
+    ca = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE")
+    if ca and not getattr(vclient.VastSession, "_candid_ca", False):
+        base_init = vclient.VastSession.__init__
+
+        def init(self, *a, **kw):
+            base_init(self, *a, **kw)
+            self.verify = ca
+
+        vclient.VastSession.__init__ = init
+        vclient.VastSession._candid_ca = True
     return VastAI(api_key=os.environ.get("VAST_API_KEY") or "proxy-injected")
 
 
