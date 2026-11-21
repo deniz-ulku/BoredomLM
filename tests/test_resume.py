@@ -84,6 +84,9 @@ def test_parse_log():
     alive = launch.parse_log('[state] {"stage":"train"}\nnoise\n')
     assert alive["started"] and alive["running"]
     assert not launch.parse_log("[bootstrap] data wait over: none, starting fresh")["data_ready"]
+    resumed = launch.parse_log('[bootstrap] data wait over: none, starting fresh\n[run] start\n'
+                               '[state] {"stage":"assemble","done":["prompts"],"attempt":2}\n')
+    assert resumed["data_ready"]  # the pipeline found the copied state anyway
 
 
 def test_launch_only_with_credit():

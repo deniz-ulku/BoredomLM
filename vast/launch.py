@@ -50,6 +50,7 @@ CODE_PATHS = ["candid", "remote", "pyproject.toml"]
 # A rescue machine (CANDID_RESCUE=1) first waits until the previous machine's work dir
 # has been copied in by the supervisor and has stopped changing (or WAIT_FOR_DATA is removed).
 BOOTSTRAP = f"""
+mkdir -p /workspace
 if [ "${{CANDID_RESCUE:-0}}" = "1" ] && [ ! -f /workspace/.rescued ]; then
   touch /workspace/WAIT_FOR_DATA; echo "[bootstrap] waiting for data from the previous machine"
   prev=""; stable=0
@@ -182,6 +183,9 @@ def parse_log(text: str) -> dict:
     out["running"] = last_start > last_exit
     if last_exit < last_start:
         out["exit"] = None
+    # A pipeline that resumed an earlier attempt can only have found that state in copied data.
+    if out["started"] and (out["state"].get("attempt") or 0) > 1:
+        out["data_ready"] = True
     return out
 
 
