@@ -186,6 +186,9 @@ def test_gpu_taken_triggers_rescue_and_copy():
     rescuer = inst(8, status="loading", age_min=2, label="candid-v0~from:7")
     acts, _ = d(1.0, [waiting, rescuer], {7: LOG_TRAINING, 8: ""})
     assert acts == []  # source left alone, rescuer still booting
+    came_back = inst(7, status="running", label=waiting["label"])
+    acts, _ = d(1.0, [came_back, rescuer], {7: LOG_TRAINING, 8: ""})
+    assert acts == [("stop", 7, "its GPU came back, but a rescue machine is taking over")]
     rescuer["actual_status"] = "running"
     acts, _ = d(1.0, [waiting, rescuer], {7: LOG_TRAINING, 8: ""})
     assert acts == [("copy", 8, "7")]

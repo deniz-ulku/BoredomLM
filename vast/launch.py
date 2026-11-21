@@ -270,7 +270,9 @@ def decide(credit: float, instances: list[dict], logs: dict, now: float, run: st
                 summaries.append(f"copy {src} -> {iid} in progress")
             continue
 
-        if iid in rescuers:  # data source of a rescue in progress: leave it alone
+        if iid in rescuers:  # data source of a rescue in progress: keep it stopped, do not touch its disk
+            if not stopped:
+                actions.append(("stop", iid, "its GPU came back, but a rescue machine is taking over"))
             summaries.append(f"{iid} is the data source of a rescue")
             continue
 
@@ -375,6 +377,7 @@ def tick(a) -> str:
         if act == "launch":
             launch(a.run, a.max_dph, a.max_hours, overrides)
         elif act == "rescue":
+            v.stop_instance(iid)  # cancel the queued start so the old machine cannot run alongside
             new = launch(a.run, a.max_dph, a.max_hours, overrides, label=f"candid-{a.run}~from:{iid}", rescue=True)
             if wait_running(v, new, 8):  # copy right away; otherwise the next tick does it
                 start_copy(v, a.run, iid, new)
