@@ -1,16 +1,15 @@
-# Python
 __pycache__/
 *.pyc
-*.pyo
+.venv/
+.pytest_cache/
 
-# Model checkpoints (large binary files)
-checkpoints/
-*.pt
+# Pipeline outputs (uploaded to the Hugging Face Hub, never committed)
+work/
+outputs/
+*.safetensors
+*.gguf
 
-# Training outputs
-results/
-runs/
+# Local launcher state
+vast/ledger.json
 
-# OS
 .DS_Store
-Thumbs.db

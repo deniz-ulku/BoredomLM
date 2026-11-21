@@ -1,116 +1,64 @@
-# BoredomLM-1.18B
+# Candid
 
-**A 1.18-billion-parameter Transformer language model, trained from scratch on a single 8 GB consumer GPU - in one Python file.**
+An assistant that runs on your phone and answers plainly.
 
-No cloud. No pretrained weights. Just code, data, and compute.
+- **On-device.** No message limits, no photo limits, no account, works offline. It costs us nothing per message, so there is nothing to ration.
+- **Understands photos.** It reads what is actually in the picture, small print included, and says when part of it is unreadable instead of guessing.
+- **Searches the web** when online, from your own device, using free keyless sources.
+- **Plain answers.** No emojis, no filler, no lectures, no refusals except two narrow hard limits.
+- **Does not assume.** If missing information would change the answer, it asks one short question. Otherwise it just answers.
 
----
+## Model
 
-## What is this?
+Candid v0 is [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) (Apache-2.0, natively multimodal, 3:1 Gated DeltaNet / attention hybrid) with our own preference training on top. The training changes behaviour only; the gate in `candid/evaluate.py` rejects any run that loses more than one point on math, knowledge, Turkish or chart-reading benchmarks.
 
-BoredomLM is a complete, self-contained LLM project. Everything is hand-written and lives in a single file (`train.py`):
+How we keep the model's intelligence intact, without abliteration or weight surgery:
 
-- The Transformer model (RoPE, gated MLP, weight tying, causal attention; optional multi-token prediction and differential attention)
-- The data pipeline (FineWeb pretraining, Alpaca fine-tuning)
-- The training loop (BF16, 8-bit AdamW, gradient checkpointing, gradient accumulation)
-- Validation, metric logging, checkpoint comparison, plots, and reports
+1. The base model answers every training prompt twice: as it normally would, and with the Candid spec (`candid/spec.py`) as its system prompt.
+2. Pairs are kept only where the spec answer is clean and actually better: regex checks for refusals, filler, preaching and emojis, plus the model judging both orders.
+3. DPO with a small NLL term, LoRA on the language model only, vision tower frozen. Both answers in every pair come from the same model, so training moves behaviour, not knowledge. The DPO reference (the untouched base) anchors everything else.
 
-It was trained entirely from scratch on a **single 8 GB consumer GPU** - no pretrained weights, no cloud compute.
+Details: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Architecture
+## Layout
 
-| Component | Value |
-|---|---|
-| Parameters | ~1.18B |
-| Vocabulary | 50,257 (GPT-2) |
-| Hidden dim | 2048 |
-| Layers | 16 |
-| Attention heads | 16 (head dim 128) |
-| Context length | 2048 |
-| Positional encoding | RoPE |
-| MLP | Gated (SwiGLU-style) |
-| Weight tying | Yes |
-
-## Features
-
-- **Pretraining** on FineWeb
-- **Instruction fine-tuning** (SFT) on Alpaca
-- **Multi-token prediction (MTP)** - predict the next 4 tokens, not 1 (DeepSeek-V3's trick)
-- **Differential attention** - noise-cancelling attention (the Diff Transformer)
-- **Validation loss + perplexity** on a held-out set
-- **Live metrics** - loss, perplexity, tokens/sec, ETA, GPU memory
-- **Checkpoint comparison** - evaluate every checkpoint on the same val set
-- **Brain-scan dataset** - record how the model learns (gradients, attention, probes)
-- **Training-trick experiments** - automatically compare architectural choices
-- **Automatic reports** - machine-readable JSON + Markdown
-- **Plots** - loss, perplexity, throughput, memory
-- **Interactive console** - a menu-driven CLI
-
-## Quick start
-
-```bash
-python train.py
+```
+candid/
+  spec.py        behaviour spec, hard limits, judge prompt
+  filters.py     refusal / filler / preaching / emoji / hard-limit checks
+  sources.py     training prompt sources (public datasets, prompts only)
+  generate.py    on-policy answer generation and pair selection (vLLM)
+  train.py       DPO + NLL, LoRA, merge
+  evaluate.py    before/after benchmarks and the release gate
+  search/        keyless web search (SearXNG, ddgs, Wikipedia), page fetch, tool schema
+remote/          what runs on the GPU machine: pipeline, GGUF export, Hub upload
+vast/launch.py   start / watch / stop vast.ai runs with a hard budget
+tests/
 ```
 
-This opens the interactive console. Or run a mode directly:
+## Running a training run
+
+One run on a single 24 GB GPU (RTX 4090 class) takes roughly 6-10 hours, about $3-6 on vast.ai.
+
+One-time setup:
+- A private Hugging Face repo name for results, e.g. `you/candid-4b-v0`, and an HF write token added in vast.ai under **Account → Environment Variables** as `HF_TOKEN`.
+- A vast.ai API key in `VAST_API_KEY` (in a Claude cloud session it is stored as a network secret instead and never appears in the repo or the chat).
 
 ```bash
-python train.py train       # pretrain (resumes from the latest checkpoint)
-python train.py finetune    # instruction fine-tune
-python train.py chat        # chat with the model
-python train.py evaluate    # compare checkpoints
-python train.py plot        # generate plots
-python train.py report      # write the report
-python train.py brainscan   # record a brain-scan snapshot
-python train.py experiment  # compare training tricks
-python train.py metrics     # show latest metrics
+pip install -e ".[launch]"
+python vast/launch.py offers                         # what is available and what it costs
+python vast/launch.py launch --hub-repo you/candid-4b-v0 --max-dph 0.6 --max-hours 10
+python vast/launch.py status                         # progress, cost so far
 ```
 
-## Requirements
+The machine uploads reports, the adapter, merged weights and GGUF files (Q4_K_M and Q8_0, plus the vision projector) to the Hub repo, then destroys itself. If the gate fails, only the reports and the adapter are uploaded.
 
-- Python 3.9+
-- An NVIDIA GPU with 8 GB+ VRAM (BF16 required)
-- Dependencies auto-install on first run (`torch`, `transformers`, `datasets`, `bitsandbytes`, ...)
+## Tests
 
-## How it works
-
-1. **Pretrain** on FineWeb (next-token prediction, ~1B tokens over 500k micro-steps).
-2. **Fine-tune** on Alpaca (instruction -> response).
-3. **Chat** with the result.
-
-Every run logs to `results/metrics.csv`, TensorBoard events to `runs/`, and checkpoints to `checkpoints/`.
-
-## Brain-scan dataset
-
-`python train.py brainscan` analyzes the latest checkpoint and writes a snapshot to `results/brain_scan/`:
-
-- per-layer **gradient norms** (which layers are learning fastest)
-- per-layer **activation norms**
-- per-layer **attention entropy / max probability** + downsampled attention maps
-- **probe predictions** (the model's output on fixed prompts over time)
-- loss / validation loss / perplexity
-
-This is an open record of how a from-scratch LLM actually learns. See `results/brain_scan/README.md` for the full file format.
-
-## Experiments
-
-`python train.py experiment` trains 6 small model variants and reports which training trick wins:
-
-| variant | what it tests |
-|---|---|
-| `baseline` | the default architecture |
-| `mtp` | multi-token prediction (4 tokens) |
-| `diff_attn` | differential attention |
-| `cosine_lr` | cosine learning-rate decay |
-| `no_weight_tying` | untied output head |
-| `curriculum` | length-based curriculum |
-
-Results are written to `results/experiments.json`.
+```bash
+pip install -e ".[dev]" && pytest
+```
 
 ## License
 
-MIT - completely open source. Fork it, modify it, build your own version, submit improvements.
-
-## Contributing
-
-Pull requests and issues are welcome. This is a learning project that grew into something real - if you make it better, share it back.
+MIT for this code. The base model weights are Apache-2.0 (Qwen3.5).

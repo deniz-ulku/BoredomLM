@@ -1,0 +1,24 @@
+[project]
+name = "candid"
+version = "0.1.0"
+description = "On-device multimodal assistant that answers plainly: training pipeline and reference tools"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["httpx>=0.27"]
+
+[project.optional-dependencies]
+search = ["ddgs>=9.16", "trafilatura>=2.3"]
+# GPU machine (vast.ai). The vLLM docker image provides torch, transformers and vllm.
+train = ["trl==1.18.2", "peft==0.22.0", "datasets>=5.2,<6", "flash-linear-attention==0.6.0", "huggingface_hub"]
+launch = ["vastai==1.11.2"]
+dev = ["pytest>=8", "ruff"]
+
+[tool.setuptools.packages.find]
+include = ["candid*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
