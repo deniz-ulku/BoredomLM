@@ -29,12 +29,45 @@ def _stream(name: str, config: str | None = None, split: str = "train"):
 
 
 TEXT_BUFFER = 10_000
-# The shuffle buffer is one Arrow table; large images overflow its 2 GB binary offsets.
-IMAGE_BUFFER = 200
+
+
+def parquet_rows(repo: str, prefix: str, columns: list[str], seed: int, max_files: int = 2,
+                 download=None, list_files=None) -> Iterator[dict]:
+    """Random rows from a few of a Hub dataset's parquet files, one row group in memory at a time.
+
+    Used for image datasets: `datasets` streaming keeps an Arrow shuffle buffer and reads
+    shards concurrently, which with ~1 GB image parquet files overflows offsets or RAM.
+    """
+    import random
+
+    import pyarrow.parquet as pq
+
+    if list_files is None or download is None:
+        from huggingface_hub import HfApi, hf_hub_download
+
+        list_files = list_files or (lambda: HfApi().list_repo_files(repo, repo_type="dataset"))
+        download = download or (lambda f: hf_hub_download(repo, f, repo_type="dataset"))
+    files = sorted(f for f in list_files() if f.startswith(prefix) and f.endswith(".parquet"))
+    if not files:
+        raise RuntimeError(f"no parquet files under {repo}/{prefix}")
+    rng = random.Random(seed)
+    rng.shuffle(files)
+    for f in files[:max_files]:
+        pf = pq.ParquetFile(download(f))
+        groups = list(range(pf.num_row_groups))
+        rng.shuffle(groups)
+        for g in groups:
+            table = pf.read_row_group(g, columns=columns)
+            order = list(range(table.num_rows))
+            rng.shuffle(order)
+            for i in order:
+                yield {c: table.column(c)[i].as_py() for c in columns}
+            del table
 
 
 def _first_working(cands: list[tuple[str, str | None, str, Callable]], seed: int,
                    buffer: int = TEXT_BUFFER) -> Iterator[Row]:
+    """First text source that loads, shuffled through `datasets` streaming."""
     last_err = None
     for name, config, split, fn in cands:
         try:
@@ -109,6 +142,12 @@ def encode_image(img, max_side: int = MAX_IMAGE_SIDE) -> dict | None:
         return None
     import io
 
+    if isinstance(img, dict):  # raw parquet struct {"bytes", "path"}
+        if not img.get("bytes"):
+            return None
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(img["bytes"]))
     img = img.convert("RGB")
     w, h = img.size
     s = max_side / max(w, h)
@@ -148,9 +187,10 @@ def _image_prompts(n: int, seed: int) -> list[Row]:
     out: list[Row] = []
     for sub in CAULDRON_SUBSETS:
         try:
-            it = _first_working([("HuggingFaceM4/the_cauldron", sub, "train", _map_cauldron)], seed, IMAGE_BUFFER)
-            out += _take(it, per, "image")
-        except RuntimeError as e:
+            rows = parquet_rows("HuggingFaceM4/the_cauldron", f"{sub}/", ["images", "texts"], seed, max_files=1)
+            out += _take((r for ex in rows for r in _map_cauldron(ex)), per, "image")
+            log.info("using HuggingFaceM4/the_cauldron (%s)", sub)
+        except Exception as e:  # noqa: BLE001 - one missing subset must not stop the run
             log.warning("skipping cauldron/%s: %s", sub, e)
     for i, r in enumerate(out):
         r["id"] = f"image-{i}"
@@ -190,6 +230,6 @@ def image_preference_pairs(cfg: Config) -> list[dict]:
             yield {"prompt": ex.get("question"), "image": encode_image(ex["image"]),
                    "chosen": ex["chosen"], "rejected": ex["rejected"]}
 
-    it = _first_working([("openbmb/RLAIF-V-Dataset", None, "train", m)], cfg.seed, IMAGE_BUFFER)
-    rows = _take(it, cfg.n_image_pref, "image_pref")
-    return rows
+    rows = parquet_rows("openbmb/RLAIF-V-Dataset", "", ["image", "question", "chosen", "rejected"], cfg.seed,
+                        max_files=1)
+    return _take((r for ex in rows for r in m(ex)), cfg.n_image_pref, "image_pref")

@@ -72,3 +72,29 @@ def test_gate(tmp_path):
 
     _write(cfg, "tuned", _report(over_refusal=5.0, chartqa=None))  # missing benchmark is skipped, not failed
     assert evaluate.gate(cfg)[0]
+
+
+def test_parquet_rows_reads_images_one_group_at_a_time(tmp_path):
+    import io
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from PIL import Image
+
+    from candid.sources import _map_cauldron, _take, parquet_rows
+
+    def png(color):
+        buf = io.BytesIO()
+        Image.new("RGB", (2400, 1200), color).save(buf, format="PNG")
+        return {"bytes": buf.getvalue(), "path": None}
+
+    rows = [{"images": [png((i, 0, 0))], "texts": [{"user": f"q{i}", "assistant": "a"}]} for i in range(10)]
+    path = tmp_path / "train-0.parquet"
+    pq.write_table(pa.Table.from_pylist(rows), path, row_group_size=3)
+    it = parquet_rows("repo", "chartqa/", ["images", "texts"], seed=1,
+                      list_files=lambda: ["chartqa/train-0.parquet", "other/x.parquet", "README.md"],
+                      download=lambda f: str(path))
+    out = _take((r for ex in it for r in _map_cauldron(ex)), 4, "image")
+    assert len(out) == 4 and len({r["prompt"] for r in out}) == 4
+    img = Image.open(io.BytesIO(out[0]["image"]["bytes"]))
+    assert img.format == "JPEG" and img.size == (1536, 768)
