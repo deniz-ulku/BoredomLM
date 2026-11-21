@@ -175,6 +175,9 @@ def test_restart_is_remembered_then_cleared():
     started = inst(7, label=f"candid-v0~start:{int(NOW) - 60}")
     acts, _ = d(1.0, [started], {7: LOG_TRAINING})
     assert ("label:candid-v0", 7, "restarted fine") in acts
+    # the previous start's exit line is still the last line: must not be mistaken for this start ending
+    acts, _ = d(1.0, [started], {7: LOG_TRAINING + "[run] exit 137\n"})
+    assert acts == [("label:candid-v0", 7, "restarted fine")]
 
 
 def test_gpu_taken_triggers_rescue_and_copy():

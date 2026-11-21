@@ -310,7 +310,11 @@ def decide(credit: float, instances: list[dict], logs: dict, now: float, run: st
             continue
 
         if status == "running" and lab["kind"] == "starting":
+            # Just restarted: the log still ends with the previous start's exit line, and this
+            # start may not have written its own lines yet. Judge it on the next tick.
             actions.append((f"label:{base}", iid, "restarted fine"))
+            summaries.append(f"{iid} restarted")
+            continue
         if status == "running" and info is not None:
             if info["exit"] is not None and not info["running"]:
                 code = info["exit"]
