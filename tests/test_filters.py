@@ -66,3 +66,16 @@ def test_lang_and_think():
     assert detect_lang("bu ne demek") == "tr"
     assert detect_lang("How does this work?") == "en"
     assert strip_think("<think>hmm</think>\n\nAnswer.") == "Answer."
+
+
+def test_encode_image_resizes_and_compresses():
+    from PIL import Image
+
+    from candid.sources import encode_image
+
+    enc = encode_image(Image.new("RGBA", (4000, 1000), (10, 20, 30, 255)))
+    assert enc["path"] is None and enc["bytes"][:2] == b"\xff\xd8"  # JPEG
+    import io
+
+    assert Image.open(io.BytesIO(enc["bytes"])).size == (1536, 384)
+    assert encode_image(None) is None

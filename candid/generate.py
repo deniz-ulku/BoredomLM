@@ -31,19 +31,12 @@ from candid.spec import DECLINE, JUDGE_PROMPT, SPEC
 
 log = logging.getLogger("candid.generate")
 
-MAX_IMAGE_SIDE = 1536
 CHUNK = 256
 
 
 def _prep_image(img):
-    if img is None:
-        return None
-    img = img.convert("RGB")
-    w, h = img.size
-    s = MAX_IMAGE_SIDE / max(w, h)
-    if s < 1:
-        img = img.resize((max(1, int(w * s)), max(1, int(h * s))))
-    return img
+    """Decoded image for vLLM (stored images are already resized JPEGs)."""
+    return None if img is None else img.convert("RGB")
 
 
 def _user_msg(text: str, image) -> dict:
@@ -130,7 +123,7 @@ def prompts(cfg: Config, store) -> None:
                       "prompt": Value("string"), "image": Image()})
     ds = Dataset.from_dict({
         "id": [r["id"] for r in rows], "bucket": [r["bucket"] for r in rows], "lang": [r["lang"] for r in rows],
-        "prompt": [r["prompt"] for r in rows], "image": [_prep_image(r.get("image")) for r in rows],
+        "prompt": [r["prompt"] for r in rows], "image": [r.get("image") for r in rows],  # encoded bytes
     }, features=feats)
     ds.save_to_disk(store.local("prompts"))
     store.push("prompts", replace=True)
@@ -165,6 +158,8 @@ def shards(cfg: Config, store) -> None:
     for i in todo:
         lo, hi = i * cfg.shard_size, min(len(ds), (i + 1) * cfg.shard_size)
         rows = [dict(ex) for ex in ds.select(range(lo, hi))]
+        for r in rows:
+            r["image"] = _prep_image(r["image"])
         defaults = [o[0] for o in _chat(llm, [[_user_msg(r["prompt"], r["image"])] for r in rows], default_p,
                                         f"shard {i} default")]
         specs = _chat(llm, [[{"role": "system", "content": SPEC}, _user_msg(r["prompt"], r["image"])] for r in rows],
@@ -202,7 +197,8 @@ def assemble(cfg: Config, store) -> dict:
 
     store.pull("prompts")
     store.pull("gen")
-    ds = load_from_disk(store.local("prompts"))
+    # Keep images as encoded bytes here; decoding thousands of them at once exhausts RAM.
+    ds = load_from_disk(store.local("prompts")).cast_column("image", Image(decode=False))
     n = (len(ds) + cfg.shard_size - 1) // cfg.shard_size
     stats, items = Counter(), []
     for i in range(n):
@@ -216,7 +212,7 @@ def assemble(cfg: Config, store) -> dict:
 
     for j, p in enumerate(image_preference_pairs(cfg)):
         if is_clean(p["chosen"]) and not is_refusal(p["chosen"]):
-            items.append((p["prompt"], _prep_image(p["image"]), p["chosen"], p["rejected"], "image_pref",
+            items.append((p["prompt"], p["image"], p["chosen"], p["rejected"], "image_pref",
                           f"image_pref-{j}"))
             stats["image_pref/kept"] += 1
 

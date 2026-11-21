@@ -100,10 +100,29 @@ def _map_orbench(ex):
     yield {"prompt": ex.get("prompt"), "category": ex.get("category")}
 
 
+MAX_IMAGE_SIDE = 1536
+
+
+def encode_image(img, max_side: int = MAX_IMAGE_SIDE) -> dict | None:
+    """Resize and JPEG-encode right away: thousands of decoded images do not fit in RAM."""
+    if img is None:
+        return None
+    import io
+
+    img = img.convert("RGB")
+    w, h = img.size
+    s = max_side / max(w, h)
+    if s < 1:
+        img = img.resize((max(1, int(w * s)), max(1, int(h * s))))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=92)
+    return {"bytes": buf.getvalue(), "path": None}
+
+
 def _map_cauldron(ex):
     imgs, texts = ex.get("images") or [], ex.get("texts") or []
     if len(imgs) == 1 and texts:
-        yield {"prompt": texts[0].get("user"), "image": imgs[0]}
+        yield {"prompt": texts[0].get("user"), "image": encode_image(imgs[0])}
 
 
 GENERAL_EN = [
@@ -168,7 +187,7 @@ def image_preference_pairs(cfg: Config) -> list[dict]:
     """RLAIF-V: human/AI-labelled pairs where the rejected answer describes things not in the image."""
     def m(ex):
         if ex.get("image") is not None and ex.get("chosen") and ex.get("rejected"):
-            yield {"prompt": ex.get("question"), "image": ex["image"],
+            yield {"prompt": ex.get("question"), "image": encode_image(ex["image"]),
                    "chosen": ex["chosen"], "rejected": ex["rejected"]}
 
     it = _first_working([("openbmb/RLAIF-V-Dataset", None, "train", m)], cfg.seed, IMAGE_BUFFER)
