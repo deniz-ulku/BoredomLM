@@ -1,40 +1,70 @@
-"""Start, watch and stop Candid training runs on vast.ai, with a hard budget.
+"""Run Candid training on vast.ai with whatever credit there is, and keep it going.
 
-    python vast/launch.py offers                       # cheapest suitable GPUs right now
-    python vast/launch.py launch --hub-repo you/candid-4b-v0 [--max-dph 0.6] [--max-hours 10]
-    python vast/launch.py status                       # running instances, cost so far
-    python vast/launch.py destroy <instance_id>
+    python vast/launch.py offers         # best GPUs right now, ranked by expected total job cost
+    python vast/launch.py tick           # supervisor step: start / stop / launch as credit allows
+    python vast/launch.py status         # credit, machine, last progress line
+    python vast/launch.py logs [N]       # tail of the machine's log
+    python vast/launch.py destroy <id>   # permanently delete a machine and its disk
 
-Budget protection, three independent layers:
-  1. launch refuses if (spent so far + max_dph * max_hours) would exceed --budget (default $50).
-  2. the remote pipeline runs under `timeout max_hours` and destroys its own instance when done.
-  3. `status` destroys any instance that has run longer than its max_hours.
+How credit-limited training works:
+  * One machine per run. Its disk holds all progress (candid/pipeline.py is resumable).
+  * When the credit hits zero, vast.ai stops the machine. The disk stays (it bills a few
+    cents a day for storage, so offers with cheap storage are preferred).
+  * `tick` runs on a schedule. When credit is above --min-credit (default $0.10) it
+    starts the stopped machine again and training continues where it stopped.
+  * When the pipeline finishes or hits a code error, the machine stops itself.
 
-The API key is read from VAST_API_KEY. In a Claude cloud session the network proxy
-adds the real key to requests, so the value here can be a placeholder.
+Code reaches the machine without any third-party account: it is embedded (gzip+base64)
+in the instance's environment at creation. If the branch exists on GitHub, the machine
+uses that instead, which is how fixes reach an existing machine.
+
+Key: VAST_API_KEY. In a Claude cloud session it is a network secret injected by the
+proxy, so the value here is a placeholder.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import json
 import os
+import re
 import sys
+import tarfile
 import time
 
-LEDGER = os.path.join(os.path.dirname(__file__), "ledger.json")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGE = "vllm/vllm-openai:v0.34.0"
-REPO_URL = "https://github.com/deniz-ulku/BoredomLM"
-GPUS = ["RTX_4090", "RTX_5090", "RTX_6000Ada", "L40S", "A100_SXM4", "A100_PCIE", "H100_SXM", "H100_PCIE"]
-LABEL = "candid-train"
+DISK_GB = 80
+REF_TFLOPS = 82.6          # RTX 4090, the reference for job-time estimates
+JOB_HOURS_REF = 6.0        # whole v0 pipeline on the reference GPU (estimate)
+DOWNLOAD_GB = 30           # docker image + base model + datasets on a fresh machine
+IDLE_DAYS = 2.0            # expected days stopped while waiting for top-ups (storage still bills)
+STUCK_MINUTES = 25         # running this long without the pipeline ever starting = broken bootstrap
+BRANCH = "claude/yeni-ai-model-design-zbit2y"
+REPO = "https://github.com/deniz-ulku/BoredomLM"
+CODE_PATHS = ["candid", "remote", "pyproject.toml"]
+
+BOOTSTRAP = f"""
+mkdir -p /workspace/src && cd /workspace/src && rm -rf code code-git
+if git clone -q --depth 1 -b {BRANCH} {REPO} code-git 2>/dev/null && [ -f code-git/candid/pipeline.py ]; then
+  mv code-git code; echo "[bootstrap] code from GitHub"
+else
+  mkdir code && echo "$CANDID_CODE" | base64 -d | tar xz -C code; echo "[bootstrap] embedded code"
+fi
+pip install -q vastai==1.11.2
+cd code && bash remote/run.sh
+"""
 
 
-def _client():
+# ----- vast client -------------------------------------------------------------
+
+def vast():
     from vastai import VastAI
     from vastai.api import client as vclient
 
     # vastai calls Session.send() directly, which skips requests' environment CA settings.
-    # Honour REQUESTS_CA_BUNDLE so the SDK works behind TLS-inspecting proxies.
     ca = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE")
     if ca and not getattr(vclient.VastSession, "_candid_ca", False):
         base_init = vclient.VastSession.__init__
@@ -48,123 +78,235 @@ def _client():
     return VastAI(api_key=os.environ.get("VAST_API_KEY") or "proxy-injected")
 
 
-def _ledger() -> dict:
-    try:
-        with open(LEDGER) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"runs": []}
+def code_bundle() -> str:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for p in CODE_PATHS:
+            tar.add(os.path.join(ROOT, p), arcname=p,
+                    filter=lambda t: None if "__pycache__" in t.name or t.name.endswith(".pyc") else t)
+    return base64.b64encode(buf.getvalue()).decode()
 
 
-def _save_ledger(d: dict) -> None:
-    with open(LEDGER, "w") as f:
-        json.dump(d, f, indent=2)
+# ----- offers ------------------------------------------------------------------
+
+def expected_cost(o: dict) -> float:
+    """Expected $ for the whole job on this offer: downloads + work scaled by compute + idle storage."""
+    perf = o.get("total_flops") or 0
+    if perf <= 0 or not o.get("dph_total"):
+        return float("inf")
+    setup_h = 0.1 + (DOWNLOAD_GB * 8000 / max(o.get("inet_down") or 100, 50)) / 3600
+    work = o["dph_total"] * (setup_h + JOB_HOURS_REF * REF_TFLOPS / perf)
+    idle = (o.get("storage_cost") or 0.15) * DISK_GB * IDLE_DAYS / 30
+    return work + idle
 
 
 def find_offers(max_dph: float, limit: int = 10) -> list[dict]:
-    q = (f"num_gpus=1 gpu_ram>=24 reliability>0.98 disk_space>=150 inet_down>=500 "
-         f"cuda_vers>=12.8 dph_total<={max_dph} gpu_name in [{','.join(GPUS)}]")
-    offers = _client().search_offers(query=q, order="dph_total", limit=50, storage=150)
-    # Prefer more compute per dollar: rough score = TFLOPS / $ per hour.
-    offers.sort(key=lambda o: -(o.get("total_flops") or 0) / max(o.get("dph_total") or 1e9, 1e-6))
+    q = (f"num_gpus=1 gpu_ram>=31 compute_cap>=800 reliability>0.98 disk_space>={DISK_GB} inet_down>=300 "
+         f"cuda_vers>=12.8 dph_total<={max_dph} rentable=true verified=true")
+    offers = vast().search_offers(query=q, order="dph_total", limit=100, storage=DISK_GB)
+    offers.sort(key=expected_cost)
     return offers[:limit]
 
 
-def cmd_offers(a):
-    for o in find_offers(a.max_dph):
-        print(f"{o['id']:>10}  {o['gpu_name']:<14} {o['gpu_ram'] / 1024:>4.0f} GB  ${o['dph_total']:.3f}/h  "
-              f"{o.get('total_flops', 0):>6.1f} TFLOPS  rel {o.get('reliability2', o.get('reliability', 0)):.3f}  "
-              f"{o.get('geolocation', '')}")
+def _fmt(o: dict) -> str:
+    return (f"{o['id']:>10}  {o['gpu_name']:<16} {o['gpu_ram'] / 1024:>3.0f} GB  ${o['dph_total']:.3f}/h  "
+            f"{o.get('total_flops', 0):>6.1f} TFLOPS  {o.get('inet_down', 0):>5.0f} Mbps  "
+            f"disk ${o.get('storage_cost') or 0:.2f}/GB/mo  job ~${expected_cost(o):.2f}  {o.get('geolocation', '')}")
 
 
-def spent(ledger: dict) -> float:
-    return sum(r.get("cost", 0.0) for r in ledger["runs"])
+# ----- reading the machine's log -----------------------------------------------
+
+def parse_log(text: str) -> dict:
+    """What the pipeline last reported: state line, whether it is running, last exit code."""
+    out = {"state": {}, "started": False, "running": False, "exit": None}
+    last_start = last_exit = -1
+    for n, line in enumerate((text or "").splitlines()):
+        if line.startswith("[state] "):
+            try:
+                out["state"] = json.loads(line[len("[state] "):])
+            except json.JSONDecodeError:
+                pass
+        elif line.startswith("[run] start"):
+            last_start, out["started"] = n, True
+        elif m := re.match(r"\[run\] exit (-?\d+)", line):
+            last_exit, out["exit"] = n, int(m.group(1))
+    out["running"] = last_start > last_exit
+    if last_exit < last_start:
+        out["exit"] = None
+    return out
 
 
-def cmd_launch(a):
-    ledger = _ledger()
-    worst = a.max_dph * a.max_hours
-    if spent(ledger) + worst > a.budget:
-        sys.exit(f"refusing: spent ${spent(ledger):.2f} + worst case ${worst:.2f} > budget ${a.budget:.2f}")
-    offers = find_offers(a.max_dph, limit=1)
+def read_log(v, iid: int, tail: int = 400) -> str | None:
+    try:
+        res = v.logs(iid, tail=str(tail))
+        return res if isinstance(res, str) else json.dumps(res)
+    except Exception as e:  # noqa: BLE001 - logs are best effort
+        print(f"(could not read logs of {iid}: {e})")
+        return None
+
+
+# ----- supervisor --------------------------------------------------------------
+
+def decide(credit: float, instances: list[dict], logs: dict, now: float, run: str,
+           min_credit: float) -> tuple[list[tuple[str, int | None, str]], str]:
+    """Pure decision step. Returns ([(action, instance_id, detail)], summary).
+
+    Actions: start, stop, destroy, launch, label:<new label>.
+    """
+    base = f"candid-{run}"
+    mine = [i for i in instances if (i.get("label") or "").startswith(base)]
+    have_credit = credit > min_credit
+    actions: list[tuple[str, int | None, str]] = []
+
+    if not mine:
+        if have_credit:
+            return [("launch", None, f"credit ${credit:.2f}")], "launching a new machine"
+        return [], f"waiting for credit (have ${credit:.2f}, need > ${min_credit:.2f})"
+
+    summaries = []
+    for i in mine:
+        iid, label = i["id"], i.get("label")
+        status = (i.get("actual_status") or "").lower()
+        stopped = status in ("exited", "stopped", "offline") or (i.get("intended_status") or "") == "stopped"
+        info = parse_log(logs.get(iid)) if logs.get(iid) is not None else None
+        st = (info or {}).get("state", {})
+        age_min = (now - (i.get("start_date") or now)) / 60
+
+        if label == f"{base}-done":
+            summaries.append(f"finished on {iid} (gate {st.get('gate', '?')}); model is on its disk")
+            continue
+        if label == f"{base}-failed":
+            stage = st.get("failed")
+            fails = (st.get("failures") or {}).get(stage, 0) if stage else 0
+            if stage and fails < 2 and have_credit:
+                actions += [(f"label:{base}", iid, "retry once"), ("start", iid, f"retry stage {stage}")]
+                summaries.append(f"retrying failed stage {stage}")
+            else:
+                summaries.append(f"blocked: stage {stage or '?'} failed {fails}x on {iid}; needs a code fix")
+            continue
+
+        if stopped:
+            if have_credit:
+                actions.append(("start", iid, f"credit ${credit:.2f}"))
+                summaries.append(f"restarting {iid} (was at {st.get('stage', '?')})")
+            else:
+                summaries.append(f"{iid} stopped at {st.get('stage', '?')}; waiting for credit "
+                                 f"(have ${credit:.2f}, need > ${min_credit:.2f})")
+            continue
+
+        if status == "running" and info is not None:
+            if info["exit"] is not None and not info["running"]:
+                code = info["exit"]
+                if code == 0:
+                    actions.append((f"label:{base}-done", iid, "pipeline finished"))
+                elif code != 124:
+                    actions.append((f"label:{base}-failed", iid, f"pipeline exited {code}"))
+                actions.append(("stop", iid, "pipeline ended; idle GPU"))
+                summaries.append(f"{iid} pipeline ended with {code}")
+                continue
+            if not info["started"] and age_min > STUCK_MINUTES:
+                actions.append(("destroy", iid, f"{age_min:.0f} min without the pipeline starting"))
+                summaries.append(f"{iid} bootstrap broken")
+                continue
+        progress = st.get("progress") or st.get("stage") or status or "starting"
+        summaries.append(f"{iid} {status or 'starting'}: {progress}")
+    return actions, "; ".join(summaries)
+
+
+def launch(run: str, max_dph: float, max_hours: float, overrides: dict[str, str]) -> dict:
+    offers = find_offers(max_dph, limit=3)
     if not offers:
-        sys.exit(f"no suitable offer at <= ${a.max_dph}/h right now")
-    o = offers[0]
-    env = {
-        "CANDID_HUB_REPO": a.hub_repo,
-        "CANDID_MAX_HOURS": str(a.max_hours),
-        "CANDID_STAGES": a.stages,
-        "CANDID_KEEP_ALIVE": "1" if a.keep_alive else "0",
-    }
-    for kv in a.set or []:
-        k, v = kv.split("=", 1)
-        env[f"CANDID_{k.upper()}"] = v
-    onstart = (f"cd /workspace && rm -rf candid && git clone --depth 1 -b {a.branch} {REPO_URL} candid && "
-               f"cd candid && bash remote/run.sh")
-    res = _client().create_instance(id=o["id"], image=IMAGE, disk=150, env=env, label=LABEL,
-                                    onstart_cmd=onstart, ssh=True, direct=True)
-    iid = res.get("new_contract") if isinstance(res, dict) else None
-    print(json.dumps(res, indent=2, default=str))
-    ledger["runs"].append({"instance": iid, "offer": o["id"], "gpu": o["gpu_name"], "dph": o["dph_total"],
-                           "max_hours": a.max_hours, "started": time.time(), "cost": 0.0, "hub_repo": a.hub_repo})
-    _save_ledger(ledger)
-    print(f"launched instance {iid} on {o['gpu_name']} at ${o['dph_total']:.3f}/h, hard stop after {a.max_hours} h "
-          f"(worst case ${o['dph_total'] * a.max_hours:.2f})")
+        raise SystemExit(f"no suitable offer at <= ${max_dph}/h right now")
+    env = {"CANDID_RUN": run, "CANDID_MAX_HOURS": str(max_hours), "CANDID_CODE": code_bundle(),
+           **{f"CANDID_{k.upper()}": v for k, v in overrides.items()}}
+    last_err = None
+    for o in offers:  # an offer can be taken by someone else between search and create
+        try:
+            res = vast().create_instance(id=o["id"], image=IMAGE, disk=DISK_GB, env=env, label=f"candid-{run}",
+                                         onstart_cmd=BOOTSTRAP, ssh=True, direct=True)
+            if isinstance(res, dict) and res.get("new_contract"):
+                print(f"launched {res['new_contract']}: {_fmt(o)}")
+                return res
+            last_err = res
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    raise SystemExit(f"could not create an instance: {last_err}")
+
+
+def tick(a) -> str:
+    v = vast()
+    credit = float(v.show_user().get("credit") or 0)
+    instances = v.show_instances()
+    logs = {i["id"]: read_log(v, i["id"]) for i in instances
+            if (i.get("label") or "").startswith(f"candid-{a.run}")}
+    actions, summary = decide(credit, instances, logs, time.time(), a.run, a.min_credit)
+    for act, iid, why in actions:
+        print(f"{act} {iid or ''}: {why}")
+        if act == "launch":
+            launch(a.run, a.max_dph, a.max_hours, dict(kv.split("=", 1) for kv in a.set or []))
+        elif act == "start":
+            v.start_instance(iid)
+        elif act == "stop":
+            v.stop_instance(iid)
+        elif act == "destroy":
+            v.destroy_instance(iid)
+        elif act.startswith("label:"):
+            v.label_instance(iid, act.split(":", 1)[1])
+    line = f"[tick] credit ${credit:.2f} | {summary}"
+    print(line)
+    return line
+
+
+# ----- commands ----------------------------------------------------------------
+
+def _mine(v, run):
+    return [i for i in v.show_instances() if (i.get("label") or "").startswith(f"candid-{run}")]
 
 
 def cmd_status(a):
-    c = _client()
-    ledger = _ledger()
-    live = {i["id"]: i for i in c.show_instances() if i.get("label") == LABEL}
-    for r in ledger["runs"]:
-        inst = live.get(r["instance"])
-        hours = (time.time() - r["started"]) / 3600
-        if inst is not None:
-            r["cost"] = round(hours * r["dph"], 3)
-            state = inst.get("actual_status") or inst.get("cur_state")
-            print(f"{r['instance']}: {state}, {hours:.2f} h, ~${r['cost']:.2f} so far, {r['gpu']}")
-            if hours > r["max_hours"] + 0.25:
-                print(f"  over its {r['max_hours']} h limit: destroying")
-                c.destroy_instance(r["instance"])
-        elif r.get("cost", 0) == 0:
-            r["cost"] = round(min(hours, r["max_hours"]) * r["dph"], 3)  # finished; upper-bound estimate
-    _save_ledger(ledger)
-    print(f"total spent (estimate): ${spent(ledger):.2f}")
-    try:
-        user = c.show_user()
-        print(f"vast.ai credit: ${float(user.get('credit', 0)):.2f}")
-    except Exception as e:  # noqa: BLE001
-        print(f"(could not read account credit: {e})")
+    v = vast()
+    print(f"credit: ${float(v.show_user().get('credit') or 0):.2f}")
+    for i in _mine(v, a.run):
+        hours = (time.time() - (i.get("start_date") or time.time())) / 3600
+        print(f"{i['id']} {i.get('label')} {i.get('actual_status')} {i.get('gpu_name')} "
+              f"${i.get('dph_total', 0):.3f}/h, created {hours:.1f} h ago")
+        info = parse_log(read_log(v, i["id"]) or "")
+        print("  last state:", json.dumps(info["state"]), "| pipeline running:", info["running"],
+              "| last exit:", info["exit"])
 
 
-def cmd_destroy(a):
-    print(_client().destroy_instance(a.id))
+def cmd_logs(a):
+    v = vast()
+    for i in _mine(v, a.run):
+        print(f"===== {i['id']} =====")
+        print(read_log(v, i["id"], tail=a.n) or "")
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--run", default="v0")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("offers")
-    p.add_argument("--max-dph", type=float, default=0.8)
-    p.set_defaults(fn=cmd_offers)
-    p = sub.add_parser("launch")
-    p.add_argument("--hub-repo", required=True, help="private HF repo for results, e.g. you/candid-4b-v0")
-    p.add_argument("--max-dph", type=float, default=0.6, help="max $/hour")
-    p.add_argument("--max-hours", type=float, default=10)
-    p.add_argument("--budget", type=float, default=50)
-    p.add_argument("--branch", default="claude/yeni-ai-model-design-zbit2y")
-    p.add_argument("--stages", default="all")
-    p.add_argument("--keep-alive", action="store_true")
-    p.add_argument("--set", action="append", help="config override, e.g. --set n_image=2000")
-    p.set_defaults(fn=cmd_launch)
+    p.add_argument("--max-dph", type=float, default=1.0)
+    p.set_defaults(fn=lambda a: [print(_fmt(o)) for o in find_offers(a.max_dph)])
+    p = sub.add_parser("tick")
+    p.add_argument("--min-credit", type=float, default=0.10)
+    p.add_argument("--max-dph", type=float, default=1.0)
+    p.add_argument("--max-hours", type=float, default=12, help="time limit per start; the next tick restarts")
+    p.add_argument("--set", action="append", help="config override for a NEW machine, e.g. --set n_image=50")
+    p.set_defaults(fn=tick)
     p = sub.add_parser("status")
     p.set_defaults(fn=cmd_status)
+    p = sub.add_parser("logs")
+    p.add_argument("n", type=int, nargs="?", default=80)
+    p.set_defaults(fn=cmd_logs)
     p = sub.add_parser("destroy")
     p.add_argument("id", type=int)
-    p.set_defaults(fn=cmd_destroy)
+    p.set_defaults(fn=lambda a: print(vast().destroy_instance(a.id)))
     a = ap.parse_args()
     a.fn(a)
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, ROOT)
     main()

@@ -14,19 +14,22 @@ from dataclasses import dataclass, field, fields
 class Config:
     # Base model: Apache-2.0, natively multimodal, 3:1 Gated DeltaNet / attention hybrid.
     base_model: str = "Qwen/Qwen3.5-4B"
-    work_dir: str = "work"
+    run: str = "v0"               # run name; state lives under runs/<run>/ in the Hub repo
+    work_dir: str = "hub/runs/v0"  # local mirror of runs/<run>/ (see candid/store.py)
     seed: int = 0
 
     # Prompt mix (number of prompts drawn per bucket; see candid/sources.py).
-    n_general_en: int = 5000
-    n_general_tr: int = 4000
-    n_over_refusal: int = 4000
+    # Sized for a ~$3 run on one 32 GB GPU.
+    n_general_en: int = 2500
+    n_general_tr: int = 2500
+    n_over_refusal: int = 2500
     n_hard_limit: int = 300
-    n_image: int = 6000
-    n_image_pref: int = 3000  # off-policy hallucination preference pairs (RLAIF-V)
+    n_image: int = 3000
+    n_image_pref: int = 1500  # off-policy hallucination preference pairs (RLAIF-V)
 
-    # On-policy generation (vLLM).
-    gen_samples: int = 4          # best-of-n samples with the behaviour spec
+    # On-policy generation (vLLM). Work is split into shards that are saved as they finish.
+    shard_size: int = 500
+    gen_samples: int = 3          # best-of-n samples with the behaviour spec
     gen_temperature: float = 0.7
     gen_max_tokens: int = 1536
     gen_max_model_len: int = 8192
@@ -42,11 +45,12 @@ class Config:
     sft_weight: float = 0.2       # RPO-style NLL on the chosen answer, keeps answers fluent
     epochs: float = 1.0
     grad_accum: int = 16
-    max_length: int = 3072
+    max_length: int = 2048
+    ckpt_minutes: float = 15      # save + upload a training checkpoint this often
 
     # Evaluation gate: tuned model may lose at most this many points on any capability benchmark.
     max_capability_drop: float = 1.0
-    eval_limit: int = 400         # examples per benchmark
+    eval_limit: int = 300         # examples per benchmark
 
     # Outputs.
     hub_repo: str = ""            # e.g. "your-name/candid-4b-v0" (private). Empty = no upload.
@@ -71,7 +75,14 @@ class Config:
             else:
                 val = raw
             setattr(cfg, f.name, val)
+        if "CANDID_WORK_DIR" not in os.environ:
+            cfg.work_dir = os.path.join("hub", "runs", cfg.run)
         return cfg
+
+    def store(self):
+        from candid.store import Store
+
+        return Store(self.hub_repo or None, self.run, self.work_dir)
 
     def path(self, *parts: str) -> str:
         p = os.path.join(self.work_dir, *parts)

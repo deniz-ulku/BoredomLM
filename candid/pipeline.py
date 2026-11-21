@@ -1,0 +1,118 @@
+"""The whole run, as resumable stages. Safe to start any number of times.
+
+    python -m candid.pipeline              # run (or continue) the run named by CANDID_RUN
+    python -m candid.pipeline push-log F   # upload a log file into the run folder
+
+Progress lives in runs/<run>/state.json on the Hub (see candid/store.py). A machine
+that disappears mid-stage (credit ran out, host went away) loses at most the current
+generation shard, eval task or training interval; the next machine skips everything
+already done. A code error is recorded as state["failed"] so the supervisor does not
+keep paying for the same crash.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import sys
+import time
+import traceback
+
+from candid.config import Config
+
+log = logging.getLogger("candid.pipeline")
+
+STAGES = ["prompts", "generate", "assemble", "eval_base", "train", "eval_tuned", "gate", "export"]
+
+
+def _stage_fns():
+    from candid import evaluate, generate, train
+
+    def eval_base(cfg, store):
+        evaluate.run(cfg.base_model, cfg, store, "base")
+
+    def eval_tuned(cfg, store):
+        evaluate.run(train.merge(cfg, store), cfg, store, "tuned")
+
+    def gate(cfg, store):
+        base = store.read_json("eval_base.json")
+        tuned = store.read_json("eval_tuned.json")
+        ok, text = evaluate.gate(cfg, base, tuned)
+        with open(store.local("report.md"), "w") as f:
+            f.write(text)
+        store.push("report.md")
+        store.update_state(gate="PASS" if ok else "FAIL")
+        print(text, flush=True)
+
+    def export(cfg, store):
+        if store.state().get("gate") != "PASS":
+            log.info("gate did not pass; skipping export")
+            return
+        train.merge(cfg, store)
+        env = {**os.environ, "CANDID_WORK_DIR": os.path.abspath(store.work_dir),
+               "CANDID_GGUF_QUANTS": ",".join(cfg.gguf_quants)}
+        subprocess.run(["bash", "remote/export_gguf.sh"], check=True, env=env)
+        store.push("gguf", replace=True)
+        store.push("merged", replace=True)
+
+    return {
+        "prompts": generate.prompts,
+        "generate": generate.shards,
+        "assemble": generate.assemble,
+        "eval_base": eval_base,
+        "train": train.run,
+        "eval_tuned": eval_tuned,
+        "gate": gate,
+        "export": export,
+    }
+
+
+def run(cfg: Config, store, fns=None) -> dict:
+    fns = fns or _stage_fns()
+    store.ensure_repo()
+    state = store.state()
+    if state.get("finished"):
+        log.info("run %s already finished", cfg.run)
+        return state
+    store.update_state(attempt=state.get("attempt", 0) + 1, failed=None, error=None,
+                       instance=os.environ.get("CONTAINER_ID"))
+    for stage in STAGES:
+        if store.is_done(stage):
+            continue
+        t0 = time.time()
+        store.update_state(stage=stage, stage_started=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        log.info("== %s ==", stage)
+        try:
+            fns[stage](cfg, store)
+        except Exception:
+            err = traceback.format_exc()
+            log.error("stage %s failed:\n%s", stage, err)
+            fails = store.state().get("failures", {})
+            fails[stage] = fails.get(stage, 0) + 1
+            store.update_state(failed=stage, error=err[-3000:], failures=fails)
+            raise
+        store.mark_done(stage)
+        log.info("%s done in %.1f min", stage, (time.time() - t0) / 60)
+    return store.update_state(finished=True, stage="finished")
+
+
+def push_log(cfg: Config, store, path: str) -> None:
+    if not os.path.exists(path):
+        return
+    attempt = store.state().get("attempt", 0)
+    rel = f"logs/attempt-{attempt:03d}.log"
+    os.makedirs(os.path.dirname(store.local(rel)), exist_ok=True)
+    with open(path, "rb") as src, open(store.local(rel), "wb") as dst:
+        dst.write(src.read()[-2_000_000:])
+    store.push(rel, message=f"log attempt {attempt}")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    cfg = Config.from_env()
+    store = cfg.store()
+    if len(sys.argv) > 2 and sys.argv[1] == "push-log":
+        push_log(cfg, store, sys.argv[2])
+    else:
+        run(cfg, store)

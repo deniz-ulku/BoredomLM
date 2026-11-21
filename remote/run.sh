@@ -1,80 +1,43 @@
 #!/usr/bin/env bash
-# Runs on the vast.ai machine (started by vast/launch.py through the instance's onstart).
+# Runs on the vast.ai machine every time it starts (see BOOTSTRAP in vast/launch.py).
 #
-# Stages: generate -> eval base -> train -> eval tuned -> gate -> export GGUF -> upload.
-# Whatever happens, reports are uploaded and the machine destroys itself at the end,
-# so a crashed or finished run never keeps billing.
+# The pipeline keeps its progress in /workspace/work on this machine's disk. If the
+# credit runs out, vast.ai stops the machine; the disk stays, and when credit is back
+# the supervisor starts the same machine and this script continues where it stopped.
 #
-# Required env (set by the launcher):   CANDID_HUB_REPO, CANDID_MAX_HOURS
-# Required env (vast account settings): HF_TOKEN
-# Optional: CANDID_STAGES (default "all"), CANDID_KEEP_ALIVE=1 (do not self-destroy; for debugging)
+# When the pipeline ends (finished or a code error) the machine stops itself, so an
+# idle GPU never keeps billing. The label tells the supervisor which case it was.
+#
+# Log lines the supervisor parses: "[run] start", "[state] {...}", "[run] exit <code>".
 
 set -uo pipefail
-export CANDID_WORK_DIR="${CANDID_WORK_DIR:-/workspace/work}"
-export HF_HUB_ENABLE_HF_TRANSFER=1
-mkdir -p "$CANDID_WORK_DIR"
-LOG="$CANDID_WORK_DIR/run.log"
-exec > >(tee -a "$LOG") 2>&1
-
 cd "$(dirname "$0")/.."
-st() { python -m remote.hub status "$@"; }
+export CANDID_RUN="${CANDID_RUN:-v0}"
+export CANDID_WORK_DIR="/workspace/work/runs/$CANDID_RUN"
+export PYTHONUNBUFFERED=1
+mkdir -p "$CANDID_WORK_DIR"
+exec > >(tee -a /workspace/run.log) 2>&1
+
+vast_self() {  # vast_self <command...>; manages this instance with its own scoped key
+  [[ -n "${CONTAINER_ID:-}" ]] && vastai "$@" --api-key "${CONTAINER_API_KEY:-}" || true
+}
 
 finish() {
   code=$?
-  st "finished" "exit=$code"
-  python -m remote.hub upload reports || true
-  if [[ "${CANDID_KEEP_ALIVE:-0}" != "1" && -n "${CONTAINER_ID:-}" ]]; then
-    echo "[run] destroying instance $CONTAINER_ID"
-    vastai destroy instance "$CONTAINER_ID" --api-key "${CONTAINER_API_KEY:-}" -y \
-      || vastai stop instance "$CONTAINER_ID" --api-key "${CONTAINER_API_KEY:-}" -y || true
+  echo "[run] exit $code"
+  [[ "${CANDID_KEEP_ALIVE:-0}" == "1" ]] && return
+  if [[ $code -eq 0 ]]; then vast_self label instance "$CONTAINER_ID" "candid-$CANDID_RUN-done"
+  elif [[ $code -ne 124 ]]; then vast_self label instance "$CONTAINER_ID" "candid-$CANDID_RUN-failed"
   fi
+  vast_self stop instance "$CONTAINER_ID"
 }
 trap finish EXIT
 
-if [[ -z "${HF_TOKEN:-}" && -n "${CANDID_HUB_REPO:-}" ]]; then
-  echo "[run] HF_TOKEN is not set. Add it in vast.ai: Account -> Environment Variables."
-  exit 2
-fi
-
-st "setup"
+echo "[run] start $(date -u +%FT%TZ) instance=${CONTAINER_ID:-?} gpu=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
 command -v git >/dev/null && command -v cmake >/dev/null || \
   (apt-get update -qq && apt-get install -y -qq git cmake build-essential >/dev/null)
 pip install -q "trl==1.18.2" "peft==0.22.0" "datasets>=5.2,<6" "flash-linear-attention==0.6.0" \
   "huggingface_hub[hf_transfer]" "vastai==1.11.2" "ddgs==9.16.1" "trafilatura==2.3.1" || exit 3
 
-MODEL_BASE="$(python -c 'from candid.config import Config; print(Config.from_env().base_model)')"
-STAGES="${CANDID_STAGES:-all}"
-want() { [[ "$STAGES" == "all" || ",$STAGES," == *",$1,"* ]]; }
-
-run_stage() {  # name, command...
-  local name=$1; shift
-  st "$name"
-  local t0=$SECONDS
-  "$@"
-  local rc=$?
-  echo "[run] $name finished in $(( (SECONDS - t0) / 60 )) min, exit $rc"
-  [[ $rc -eq 0 ]] || { st "$name" "failed exit=$rc"; exit $rc; }
-}
-
-main() {
-  want generate   && run_stage generate   python -m candid.generate
-  python -m remote.hub upload reports || true
-  want eval_base  && run_stage eval_base  python -m candid.evaluate base "$MODEL_BASE"
-  want train      && run_stage train      python -m candid.train
-  python -m remote.hub upload adapter || true
-  want eval_tuned && run_stage eval_tuned python -m candid.evaluate tuned "$CANDID_WORK_DIR/merged"
-
-  st "gate"
-  if python -m candid.evaluate gate; then
-    want export && run_stage export bash remote/export_gguf.sh
-    python -m remote.hub upload merged || true
-    python -m remote.hub upload gguf || true
-    st "done" "gate passed"
-  else
-    st "done" "gate FAILED: tuned model lost capability or behaviour did not improve; see run/report.md"
-  fi
-}
-
-# Hard wall-clock limit on the whole pipeline, independent of the launcher.
-export -f main run_stage st want
-timeout "${CANDID_MAX_HOURS:-10}h" bash -c main
+# Exit code 124 = this start's time limit; the supervisor simply starts the machine again.
+timeout "${CANDID_MAX_HOURS:-12}h" python -m candid.pipeline

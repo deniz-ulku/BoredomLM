@@ -12,7 +12,10 @@ Both sides come from the same model, so the preference signal is about behaviour
 not knowledge. That is what keeps intelligence where it was (no abliteration, no
 weight surgery).
 
-Usage (on the GPU machine):  python -m candid.generate
+Three resumable steps, each saved to the store as it finishes:
+  prompts()   sample prompts (+ images) once            -> prompts/
+  shards()    answer + select, cfg.shard_size at a time -> gen/shard-XXXXX.json
+  assemble()  render chat-templated pairs               -> pairs/
 """
 
 from __future__ import annotations
@@ -24,7 +27,6 @@ from collections import Counter
 
 from candid.config import Config
 from candid.filters import detect_lang, is_clean, is_refusal, strip_think, violations
-from candid.sources import build_prompts, image_preference_pairs
 from candid.spec import DECLINE, JUDGE_PROMPT, SPEC
 
 log = logging.getLogger("candid.generate")
@@ -51,8 +53,6 @@ def _user_msg(text: str, image) -> dict:
 
 
 def _chat(llm, convs, params, desc):
-    from vllm import SamplingParams  # noqa: F401  (imported for type clarity on the GPU box)
-
     outs = []
     for i in range(0, len(convs), CHUNK):
         log.info("%s: %d/%d", desc, i, len(convs))
@@ -76,6 +76,110 @@ def _judge(llm, rows, a_texts, b_texts) -> list[bool]:
     return [x[0].strip().upper().startswith("B") and y[0].strip().upper().startswith("A") for x, y in zip(ab, ba)]
 
 
+def select_pairs(rows, defaults, specs, rng: random.Random, judge=None):
+    """Pure selection logic. Returns (pairs as (row_index, chosen, rejected), stats)."""
+    stats = Counter()
+    pairs, need_judge = [], []
+    for i, (r, d, cands) in enumerate(zip(rows, defaults, specs)):
+        b = r["bucket"]
+        stats[f"{b}/total"] += 1
+        if b == "hard_limit":
+            decline = DECLINE[detect_lang(r["prompt"])]
+            if d.strip() != decline:
+                pairs.append((i, decline, d))
+                stats[f"{b}/kept"] += 1
+            continue
+        good = [c for c in cands if is_clean(c)]
+        if not good:
+            stats[f"{b}/no_clean_spec"] += 1
+            continue
+        chosen = rng.choice(good)
+        v = violations(d)
+        if any(v.values()) or not d.strip():
+            for k, hit in v.items():
+                stats[f"{b}/default_{k}"] += int(hit)
+            pairs.append((i, chosen, d))
+            stats[f"{b}/kept"] += 1
+        elif judge is not None:
+            need_judge.append((i, chosen, d))
+    if need_judge:
+        wins = judge([rows[i] for i, _, _ in need_judge], [d for _, _, d in need_judge],
+                     [c for _, c, _ in need_judge])
+        for (i, c, d), w in zip(need_judge, wins):
+            b = rows[i]["bucket"]
+            stats[f"{b}/judged"] += 1
+            if w:
+                pairs.append((i, c, d))
+                stats[f"{b}/kept"] += 1
+                stats[f"{b}/judge_win"] += 1
+    return pairs, stats
+
+
+# ----- step 1: prompts --------------------------------------------------------
+
+def prompts(cfg: Config, store) -> None:
+    from datasets import Dataset, Features, Image, Value
+
+    from candid.sources import build_prompts
+
+    rows = build_prompts(cfg)
+    log.info("prompts: %s", dict(Counter(r["bucket"] for r in rows)))
+    rng = random.Random(cfg.seed)
+    rng.shuffle(rows)  # mixes buckets across shards
+    feats = Features({"id": Value("string"), "bucket": Value("string"), "lang": Value("string"),
+                      "prompt": Value("string"), "image": Image()})
+    ds = Dataset.from_dict({
+        "id": [r["id"] for r in rows], "bucket": [r["bucket"] for r in rows], "lang": [r["lang"] for r in rows],
+        "prompt": [r["prompt"] for r in rows], "image": [_prep_image(r.get("image")) for r in rows],
+    }, features=feats)
+    ds.save_to_disk(store.local("prompts"))
+    store.push("prompts", replace=True)
+
+
+# ----- step 2: shards ---------------------------------------------------------
+
+def shard_name(i: int) -> str:
+    return f"gen/shard-{i:05d}.json"
+
+
+def shards(cfg: Config, store) -> None:
+    from datasets import load_from_disk
+
+    store.pull("prompts")
+    ds = load_from_disk(store.local("prompts"))
+    n = (len(ds) + cfg.shard_size - 1) // cfg.shard_size
+    todo = [i for i in range(n) if not store.exists(shard_name(i))]
+    log.info("shards: %d total, %d to do", n, len(todo))
+    if not todo:
+        return
+
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(model=cfg.base_model, max_model_len=cfg.gen_max_model_len, gpu_memory_utilization=cfg.gen_gpu_mem,
+              limit_mm_per_prompt={"image": 1}, seed=cfg.seed)
+    default_p = SamplingParams(temperature=cfg.gen_temperature, top_p=0.95, max_tokens=cfg.gen_max_tokens)
+    spec_p = SamplingParams(n=cfg.gen_samples, temperature=cfg.gen_temperature, top_p=0.95,
+                            max_tokens=cfg.gen_max_tokens)
+    judge = (lambda rows, a, b: _judge(llm, rows, a, b)) if cfg.use_self_judge else None
+
+    for i in todo:
+        lo, hi = i * cfg.shard_size, min(len(ds), (i + 1) * cfg.shard_size)
+        rows = [dict(ex) for ex in ds.select(range(lo, hi))]
+        defaults = [o[0] for o in _chat(llm, [[_user_msg(r["prompt"], r["image"])] for r in rows], default_p,
+                                        f"shard {i} default")]
+        specs = _chat(llm, [[{"role": "system", "content": SPEC}, _user_msg(r["prompt"], r["image"])] for r in rows],
+                      spec_p, f"shard {i} spec")
+        pairs, stats = select_pairs(rows, defaults, specs, random.Random(cfg.seed + i), judge)
+        store.write_json(shard_name(i), {
+            "pairs": [{"idx": lo + j, "chosen": c, "rejected": d} for j, c, d in pairs],
+            "stats": dict(stats),
+        })
+        log.info("shard %d/%d: %d pairs", i + 1, n, len(pairs))
+        store.update_state(progress=f"generate shard {i + 1}/{n}")
+
+
+# ----- step 3: assemble -------------------------------------------------------
+
 def _render(processor, prompt: str, has_image: bool, answer: str) -> tuple[str, str]:
     """Explicit (pre-templated) prompt/completion strings, non-thinking mode."""
     content = [{"type": "image"}, {"type": "text", "text": prompt}] if has_image else prompt
@@ -90,95 +194,59 @@ def _render(processor, prompt: str, has_image: bool, answer: str) -> tuple[str, 
     return prompt_s, answer + eot + "\n"
 
 
-def run(cfg: Config) -> dict:
-    from datasets import Dataset, Features, Image, Sequence, Value
+def assemble(cfg: Config, store) -> dict:
+    from datasets import Dataset, Features, Image, Sequence, Value, load_from_disk
     from transformers import AutoProcessor
-    from vllm import LLM, SamplingParams
 
-    random.seed(cfg.seed)
-    rows = build_prompts(cfg)
-    for r in rows:
-        r["image"] = _prep_image(r.get("image"))
-    log.info("prompts: %s", dict(Counter(r["bucket"] for r in rows)))
+    from candid.sources import image_preference_pairs
 
-    llm = LLM(model=cfg.base_model, max_model_len=cfg.gen_max_model_len, gpu_memory_utilization=cfg.gen_gpu_mem,
-              limit_mm_per_prompt={"image": 1}, seed=cfg.seed)
-    default_p = SamplingParams(temperature=cfg.gen_temperature, top_p=0.95, max_tokens=cfg.gen_max_tokens)
-    spec_p = SamplingParams(n=cfg.gen_samples, temperature=cfg.gen_temperature, top_p=0.95,
-                            max_tokens=cfg.gen_max_tokens)
+    store.pull("prompts")
+    store.pull("gen")
+    ds = load_from_disk(store.local("prompts"))
+    n = (len(ds) + cfg.shard_size - 1) // cfg.shard_size
+    stats, items = Counter(), []
+    for i in range(n):
+        shard = store.read_json(shard_name(i))
+        if shard is None:
+            raise RuntimeError(f"missing {shard_name(i)}")
+        stats.update(shard["stats"])
+        for p in shard["pairs"]:
+            ex = ds[p["idx"]]
+            items.append((ex["prompt"], ex["image"], p["chosen"], p["rejected"], ex["bucket"], ex["id"]))
 
-    defaults = [o[0] for o in _chat(llm, [[_user_msg(r["prompt"], r["image"])] for r in rows], default_p, "default")]
-    specs = _chat(llm, [[{"role": "system", "content": SPEC}, _user_msg(r["prompt"], r["image"])] for r in rows],
-                  spec_p, "spec")
-
-    stats = Counter()
-    pairs, need_judge = [], []
-    for r, d, cands in zip(rows, defaults, specs):
-        stats[f"{r['bucket']}/total"] += 1
-        if r["bucket"] == "hard_limit":
-            decline = DECLINE[detect_lang(r["prompt"])]
-            if d.strip() != decline:
-                pairs.append((r, decline, d))
-                stats[f"{r['bucket']}/kept"] += 1
-            continue
-        good = [c for c in cands if is_clean(c)]
-        if not good:
-            stats[f"{r['bucket']}/no_clean_spec"] += 1
-            continue
-        chosen = random.choice(good)
-        v = violations(d)
-        if any(v.values()) or not d.strip():
-            for k, hit in v.items():
-                stats[f"{r['bucket']}/default_{k}"] += int(hit)
-            pairs.append((r, chosen, d))
-            stats[f"{r['bucket']}/kept"] += 1
-        elif cfg.use_self_judge:
-            need_judge.append((r, chosen, d))
-
-    if need_judge:
-        wins = _judge(llm, [x[0] for x in need_judge], [x[2] for x in need_judge], [x[1] for x in need_judge])
-        for (r, c, d), w in zip(need_judge, wins):
-            stats[f"{r['bucket']}/judged"] += 1
-            if w:
-                pairs.append((r, c, d))
-                stats[f"{r['bucket']}/kept"] += 1
-                stats[f"{r['bucket']}/judge_win"] += 1
-    del llm
-
-    for p in image_preference_pairs(cfg):
+    for j, p in enumerate(image_preference_pairs(cfg)):
         if is_clean(p["chosen"]) and not is_refusal(p["chosen"]):
-            pairs.append(({**p, "image": _prep_image(p["image"])}, p["chosen"], p["rejected"]))
+            items.append((p["prompt"], _prep_image(p["image"]), p["chosen"], p["rejected"], "image_pref",
+                          f"image_pref-{j}"))
             stats["image_pref/kept"] += 1
 
     processor = AutoProcessor.from_pretrained(cfg.base_model)
     recs = {"images": [], "prompt": [], "chosen": [], "rejected": [], "bucket": [], "id": []}
-    for r, c, d in pairs:
-        has_img = r["image"] is not None
-        prompt_s, chosen_s = _render(processor, r["prompt"], has_img, c)
-        _, rejected_s = _render(processor, r["prompt"], has_img, d)
-        recs["images"].append([r["image"]] if has_img else [])
+    for prompt, image, chosen, rejected, bucket, rid in items:
+        has_img = image is not None
+        prompt_s, chosen_s = _render(processor, prompt, has_img, chosen)
+        _, rejected_s = _render(processor, prompt, has_img, rejected)
+        recs["images"].append([image] if has_img else [])
         recs["prompt"].append(prompt_s)
         recs["chosen"].append(chosen_s)
         recs["rejected"].append(rejected_s)
-        recs["bucket"].append(r["bucket"])
-        recs["id"].append(r["id"])
+        recs["bucket"].append(bucket)
+        recs["id"].append(rid)
 
     feats = Features({"images": Sequence(Image()), "prompt": Value("string"), "chosen": Value("string"),
                       "rejected": Value("string"), "bucket": Value("string"), "id": Value("string")})
-    ds = Dataset.from_dict(recs, features=feats).shuffle(seed=cfg.seed)
-    ds.save_to_disk(cfg.path("pairs"))
+    pairs = Dataset.from_dict(recs, features=feats).shuffle(seed=cfg.seed)
+    pairs.save_to_disk(store.local("pairs"))
+    store.push("pairs", replace=True)
 
-    with open(cfg.path("pairs_sample.jsonl"), "w") as f:
-        for r, c, d in random.sample(pairs, min(200, len(pairs))):
-            f.write(json.dumps({"bucket": r["bucket"], "prompt": r["prompt"], "chosen": c, "rejected": d},
+    rng = random.Random(cfg.seed)
+    sample = rng.sample(items, min(200, len(items)))
+    with open(store.local("pairs_sample.jsonl"), "w") as f:
+        for prompt, _, chosen, rejected, bucket, _ in sample:
+            f.write(json.dumps({"bucket": bucket, "prompt": prompt, "chosen": chosen, "rejected": rejected},
                                ensure_ascii=False) + "\n")
-    out = {"pairs": len(pairs), **dict(sorted(stats.items()))}
-    with open(cfg.path("gen_stats.json"), "w") as f:
-        json.dump(out, f, indent=2)
-    log.info("generation done: %s", out)
+    store.push("pairs_sample.jsonl")
+    out = {"pairs": len(items), **dict(sorted(stats.items()))}
+    store.write_json("gen_stats.json", out)
+    log.info("assembled: %s", out)
     return out
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    run(Config.from_env())

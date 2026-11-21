@@ -7,10 +7,7 @@ Behaviour (should improve):
   style: emoji / filler / preaching rates on everyday English and Turkish prompts
   hard_limit: refusal rate on hard-limit prompts (must stay at least as high as the base)
 
-Usage:
-  python -m candid.evaluate base   <model_path>
-  python -m candid.evaluate tuned  <model_path>
-  python -m candid.evaluate gate                 # compares the two reports, exit code 1 on failure
+Run by candid/pipeline.py. `python -m candid.evaluate` re-prints the gate from saved reports.
 """
 
 from __future__ import annotations
@@ -128,7 +125,14 @@ STYLE_PROMPTS = [
 ]
 
 
-def run(model_path: str, cfg: Config) -> dict:
+def run(model_path: str, cfg: Config, store, which: str) -> dict:
+    """Evaluate one model. Each finished task is saved, so a restarted machine skips it."""
+    rel = f"eval_{which}.json"
+    report: dict = store.read_json(rel, default=None) or {"model": model_path}
+    todo = [t for t in CAPABILITY if t not in report] + ([] if "over_refusal" in report else ["behaviour"])
+    if not todo:
+        return report
+
     from vllm import LLM, SamplingParams
 
     llm = LLM(model=model_path, max_model_len=cfg.gen_max_model_len, gpu_memory_utilization=cfg.gen_gpu_mem,
@@ -139,18 +143,26 @@ def run(model_path: str, cfg: Config) -> dict:
     def answer(convs):
         return [strip_think(r.outputs[0].text) for r in llm.chat(convs, params, **kw)]
 
-    report: dict = {"model": model_path}
-    for name in CAPABILITY:
+    for name in [t for t in todo if t in CAPABILITY]:
         try:
             convs, score = globals()[f"task_{name}"](cfg.eval_limit, cfg.seed)
             hits = score(answer(convs))
             report[name] = round(100 * sum(hits) / max(1, len(hits)), 2)
-        except Exception as e:
+        except Exception as e:  # a missing dataset must not kill the run
             log.exception("task %s failed", name)
             report[name] = None
             report[f"{name}_error"] = str(e)[:300]
         log.info("%s: %s", name, report[name])
+        store.write_json(rel, report)
 
+    if "behaviour" in todo:
+        report.update(_behaviour(cfg, answer))
+        store.write_json(rel, report)
+    return report
+
+
+def _behaviour(cfg: Config, answer) -> dict:
+    report: dict = {}
     over, limit = _behaviour_prompts(cfg.eval_limit, cfg.seed)
     over_out = answer([[{"role": "user", "content": p}] for p in over])
     limit_out = answer([[{"role": "user", "content": p}] for p in limit]) if limit else []
@@ -168,11 +180,13 @@ def run(model_path: str, cfg: Config) -> dict:
     return report
 
 
-def gate(cfg: Config) -> tuple[bool, str]:
-    with open(cfg.path("eval_base.json")) as f:
-        base = json.load(f)
-    with open(cfg.path("eval_tuned.json")) as f:
-        tuned = json.load(f)
+def gate(cfg: Config, base: dict | None = None, tuned: dict | None = None) -> tuple[bool, str]:
+    if base is None:
+        with open(cfg.path("eval_base.json")) as f:
+            base = json.load(f)
+    if tuned is None:
+        with open(cfg.path("eval_tuned.json")) as f:
+            tuned = json.load(f)
     rows, ok = [], True
     for k in CAPABILITY:
         b, t = base.get(k), tuned.get(k)
@@ -205,14 +219,8 @@ def gate(cfg: Config) -> tuple[bool, str]:
 
 
 if __name__ == "__main__":
+    # Re-print the gate from saved reports: python -m candid.evaluate gate
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    cfg = Config.from_env()
-    if sys.argv[1] == "gate":
-        passed, text = gate(cfg)
-        print(text)
-        sys.exit(0 if passed else 1)
-    which, path = sys.argv[1], sys.argv[2]
-    rep = run(path, cfg)
-    with open(cfg.path(f"eval_{which}.json"), "w") as f:
-        json.dump(rep, f, indent=2, ensure_ascii=False)
-    log.info("eval %s: %s", which, {k: v for k, v in rep.items() if k != "samples"})
+    passed, text = gate(Config.from_env())
+    print(text)
+    sys.exit(0 if passed else 1)
