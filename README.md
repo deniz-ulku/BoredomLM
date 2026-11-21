@@ -38,20 +38,28 @@ tests/
 
 ## Running a training run
 
-One run on a single 24 GB GPU (RTX 4090 class) takes roughly 6-10 hours, about $3-6 on vast.ai.
+One v0 run is about 6 GPU-hours on an RTX 4090 equivalent; on the RTX 5090 offers the launcher usually picks, roughly $3 in total. It does not need that much credit at once.
 
-One-time setup:
-- A private Hugging Face repo name for results, e.g. `you/candid-4b-v0`, and an HF write token added in vast.ai under **Account → Environment Variables** as `HF_TOKEN`.
-- A vast.ai API key in `VAST_API_KEY` (in a Claude cloud session it is stored as a network secret instead and never appears in the repo or the chat).
+The only key needed is a vast.ai API key in `VAST_API_KEY` (in a Claude cloud session it is a network secret and never appears in the repo or the chat).
 
 ```bash
 pip install -e ".[launch]"
-python vast/launch.py offers                         # what is available and what it costs
-python vast/launch.py launch --hub-repo you/candid-4b-v0 --max-dph 0.6 --max-hours 10
-python vast/launch.py status                         # progress, cost so far
+python vast/launch.py offers      # GPUs ranked by expected total job cost, not $/hour
+python vast/launch.py tick        # run this on a schedule (hourly); it does everything below
+python vast/launch.py status      # credit, machine, last progress line
+python vast/launch.py logs 100
 ```
 
-The machine uploads reports, the adapter, merged weights and GGUF files (Q4_K_M and Q8_0, plus the vision projector) to the Hub repo, then destroys itself. If the gate fails, only the reports and the adapter are uploaded.
+What `tick` does:
+- No machine yet and credit above $0.10: rents the best offer and starts the run.
+- Credit runs out: vast.ai stops the machine. Its disk keeps all progress (generation shards, a training checkpoint every 15 minutes, per-benchmark eval results).
+- Credit is back: starts the same machine again and the pipeline continues where it stopped.
+- The machine cannot start again within 20 minutes (its GPU was rented by someone else): rents a new machine, has vast.ai copy the old disk to it host-to-host, and destroys the old one once the new machine has the data.
+- The pipeline finished or hit a code error: the machine stops itself and is labelled `-done` or `-failed`. A failed stage is retried once.
+
+The finished model (GGUF Q4_K_M plus the vision projector for llama.cpp, and merged bf16 weights) is on the machine's disk under `/workspace/work/runs/v0/`.
+
+Remaining risk: if the host machine itself disappears for good while stopped, the progress on it is lost and the run starts over. Connecting a cloud storage account in vast.ai (Account → Cloud Connections) would allow off-host backups; the code for that is not written yet.
 
 ## Tests
 

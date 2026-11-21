@@ -108,11 +108,33 @@ def push_log(cfg: Config, store, path: str) -> None:
     store.push(rel, message=f"log attempt {attempt}")
 
 
+def heartbeat(store, minutes: float = 5) -> None:
+    """Repeat the state line, so any recent slice of the log shows the run is alive."""
+    import threading
+
+    def loop():
+        while True:
+            time.sleep(minutes * 60)
+            try:
+                store.announce()
+            except Exception:  # noqa: BLE001, S110 - a heartbeat must never take the run down
+                pass
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def quiet_logs() -> None:
+    for name in ("httpx", "httpx2", "httpcore", "huggingface_hub", "urllib3", "filelock", "fsspec"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    quiet_logs()
     cfg = Config.from_env()
     store = cfg.store()
     if len(sys.argv) > 2 and sys.argv[1] == "push-log":
         push_log(cfg, store, sys.argv[2])
     else:
+        heartbeat(store)
         run(cfg, store)

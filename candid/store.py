@@ -121,11 +121,15 @@ class Store:
         s.update(kw)
         s["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.write_json(STATE, s)
-        # The supervisor reads progress from the machine's log; keep this line format stable.
+        self.announce(s)
+        return s
+
+    def announce(self, s: dict | None = None) -> None:
+        """Print the state line the supervisor reads from the machine's log. Keep the format stable."""
+        s = s if s is not None else self.state()
         keys = ("stage", "done", "failed", "failures", "finished", "gate", "attempt", "progress")
         brief = {k: s.get(k) for k in keys if s.get(k)}
         print("[state] " + json.dumps(brief, separators=(",", ":")), flush=True)
-        return s
 
     def is_done(self, stage: str) -> bool:
         return stage in self.state()["done"]

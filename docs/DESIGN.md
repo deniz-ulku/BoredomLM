@@ -74,12 +74,20 @@ Total: $50 on vast.ai.
 
 | Item | Estimate |
 |---|---|
-| v0 run (generation, two evals, training, export) on one RTX 4090-class GPU | $3-6 |
+| v0 run (generation, two evals, training, export) on one RTX 5090 | about $3 |
 | Reruns and fixes | $10-15 |
 | Phase 2 (search traces, second training run) | $10-15 |
 | Reserve | the rest |
 
-Guards: per-run worst-case check against the budget, `timeout` around the remote pipeline, self-destroy at the end, and `launch.py status` destroys anything past its time limit.
+Credit arrives in small top-ups (a few dollars at a time), so the run has to survive running out of money at any moment:
+
+- **Resumable pipeline** (`candid/pipeline.py`): generation in shards, a training checkpoint every 15 minutes, eval saved per benchmark. At most one shard or one 15-minute interval is lost when the machine stops.
+- **State on the machine's disk.** No third-party storage account is needed. A stopped machine keeps its disk (about $0.35/day for 80 GB at typical prices).
+- **Supervisor** (`vast/launch.py tick`, hourly): starts the stopped machine once credit is above $0.10. If it cannot start within 20 minutes (its GPU was rented by someone else), rents a new machine and has vast.ai copy the disk host to host. Idle machines are stopped, broken ones destroyed.
+- **GPU choice** by expected total job cost (compute speed, download speed, idle storage price), not by $/hour.
+- **Code delivery** without GitHub access: the code is embedded in the instance environment (xz + base64, docstrings stripped to fit vast.ai's 32 KB env limit). If the branch exists on GitHub, that is used instead.
+
+Remaining risk: a host that disappears for good while our machine is stopped takes the progress with it. Off-host backups need a cloud storage connection in the vast.ai account.
 
 ## Roadmap
 

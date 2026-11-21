@@ -80,6 +80,10 @@ def test_parse_log():
     restarted = launch.parse_log(LOG_TRAINING + "[run] exit 1\n[run] start y\n")
     assert restarted["running"] and restarted["exit"] is None
     assert launch.parse_log("")["started"] is False
+    # [run] start scrolled out of the tail, but heartbeat state lines prove it is alive
+    alive = launch.parse_log('[state] {"stage":"train"}\nnoise\n')
+    assert alive["started"] and alive["running"]
+    assert not launch.parse_log("[bootstrap] data wait over: none, starting fresh")["data_ready"]
 
 
 def test_launch_only_with_credit():
@@ -93,7 +97,7 @@ def test_stopped_machine_restarts_when_credit_returns():
     acts, summary = d(0.05, [stopped], {7: LOG_TRAINING})
     assert acts == [] and "waiting for credit" in summary
     acts, _ = d(0.50, [stopped], {7: LOG_TRAINING})
-    assert acts == [("start", 7, "credit $0.50")]
+    assert acts[0] == ("start", 7, "credit $0.50") and acts[1][0].startswith("label:candid-v0~start:")
 
 
 def test_running_machine_left_alone():
@@ -149,3 +153,51 @@ def test_code_bundle_roundtrip(tmp_path):
         names = tar.getnames()
     assert "candid/pipeline.py" in names and "remote/run.sh" in names
     assert not any("__pycache__" in n for n in names)
+
+
+def test_parse_label():
+    b = "candid-v0"
+    assert launch.parse_label("candid-v0", b) == {"kind": "normal"}
+    assert launch.parse_label("candid-v0-done", b)["kind"] == "done"
+    assert launch.parse_label("candid-v0~start:123", b) == {"kind": "starting", "t": 123}
+    assert launch.parse_label("candid-v0~from:7", b) == {"kind": "rescue", "src": 7}
+    assert launch.parse_label("candid-v0~copy:7:99", b) == {"kind": "copying", "src": 7, "t": 99}
+    assert launch.parse_label("candid-v0x", b)["kind"] == "other"
+
+
+def test_restart_is_remembered_then_cleared():
+    stopped = inst(7, status="exited", intended="stopped")
+    acts, _ = d(1.0, [stopped], {7: LOG_TRAINING})
+    assert acts[0] == ("start", 7, "credit $1.00") and acts[1][0] == f"label:candid-v0~start:{int(NOW)}"
+    started = inst(7, label=f"candid-v0~start:{int(NOW) - 60}")
+    acts, _ = d(1.0, [started], {7: LOG_TRAINING})
+    assert ("label:candid-v0", 7, "restarted fine") in acts
+
+
+def test_gpu_taken_triggers_rescue_and_copy():
+    waiting = inst(7, status="exited", intended="running", label=f"candid-v0~start:{int(NOW) - 5 * 60}")
+    acts, summary = d(1.0, [waiting], {7: LOG_TRAINING})
+    assert acts == [] and "waiting for its GPU" in summary
+    waiting["label"] = f"candid-v0~start:{int(NOW) - 30 * 60}"
+    acts, _ = d(1.0, [waiting], {7: LOG_TRAINING})
+    assert acts[0][:2] == ("rescue", 7)
+    assert d(0.0, [waiting], {7: LOG_TRAINING})[0] == []  # no rescue without credit
+
+    rescuer = inst(8, status="loading", age_min=2, label="candid-v0~from:7")
+    acts, _ = d(1.0, [waiting, rescuer], {7: LOG_TRAINING, 8: ""})
+    assert acts == []  # source left alone, rescuer still booting
+    rescuer["actual_status"] = "running"
+    acts, _ = d(1.0, [waiting, rescuer], {7: LOG_TRAINING, 8: ""})
+    assert acts == [("copy", 8, "7")]
+
+    rescuer["label"] = f"candid-v0~copy:7:{int(NOW) - 600}"
+    assert d(1.0, [waiting, rescuer], {7: LOG_TRAINING, 8: ""})[0] == []  # copy in flight
+    log8 = "[bootstrap] data wait over: ok 2.1G\n" + LOG_TRAINING
+    acts, _ = d(1.0, [waiting, rescuer], {7: LOG_TRAINING, 8: log8})
+    assert acts == [("label:candid-v0", 8, "took over from 7"), ("destroy", 7, "its data now lives on 8")]
+
+
+def test_rescue_source_gone():
+    rescuer = inst(8, label="candid-v0~from:7")
+    acts, _ = d(1.0, [rescuer], {8: ""})
+    assert [a[0] for a in acts] == ["destroy", "launch"]

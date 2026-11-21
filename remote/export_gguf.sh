@@ -7,12 +7,13 @@ OUT="$W/gguf"; mkdir -p "$OUT"
 
 [[ -d /workspace/llama.cpp ]] || git clone --depth 1 https://github.com/ggml-org/llama.cpp /workspace/llama.cpp
 cd /workspace/llama.cpp
-pip install -q ./gguf-py
+PY=$(command -v python3 || command -v python)
+"$PY" -m pip install -q -c /workspace/constraints.txt ./gguf-py
 cmake -B build -DGGML_CUDA=OFF -DLLAMA_CURL=OFF >/dev/null
 cmake --build build --target llama-quantize -j "$(nproc)" >/dev/null
 
-python convert_hf_to_gguf.py "$W/merged" --outtype f16 --outfile "$OUT/candid-4b-f16.gguf"
-python convert_hf_to_gguf.py "$W/merged" --mmproj --outtype f16 --outfile "$OUT/candid-4b-mmproj-f16.gguf"
+"$PY" convert_hf_to_gguf.py "$W/merged" --outtype f16 --outfile "$OUT/candid-4b-f16.gguf"
+"$PY" convert_hf_to_gguf.py "$W/merged" --mmproj --outtype f16 --outfile "$OUT/candid-4b-mmproj-f16.gguf"
 
 IFS=',' read -ra QS <<< "$QUANTS"
 for q in "${QS[@]}"; do
