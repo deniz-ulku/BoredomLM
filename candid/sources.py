@@ -28,11 +28,17 @@ def _stream(name: str, config: str | None = None, split: str = "train"):
     return load_dataset(name, config, split=split, streaming=True)
 
 
-def _first_working(cands: list[tuple[str, str | None, str, Callable]], seed: int) -> Iterator[Row]:
+TEXT_BUFFER = 10_000
+# The shuffle buffer is one Arrow table; large images overflow its 2 GB binary offsets.
+IMAGE_BUFFER = 200
+
+
+def _first_working(cands: list[tuple[str, str | None, str, Callable]], seed: int,
+                   buffer: int = TEXT_BUFFER) -> Iterator[Row]:
     last_err = None
     for name, config, split, fn in cands:
         try:
-            ds = _stream(name, config, split).shuffle(seed=seed, buffer_size=10_000)
+            ds = _stream(name, config, split).shuffle(seed=seed, buffer_size=buffer)
             it = iter(ds)
             first = next(it)  # fail here, not later, if the source is broken
             log.info("using %s (%s/%s)", name, config, split)
@@ -123,7 +129,7 @@ def _image_prompts(n: int, seed: int) -> list[Row]:
     out: list[Row] = []
     for sub in CAULDRON_SUBSETS:
         try:
-            it = _first_working([("HuggingFaceM4/the_cauldron", sub, "train", _map_cauldron)], seed)
+            it = _first_working([("HuggingFaceM4/the_cauldron", sub, "train", _map_cauldron)], seed, IMAGE_BUFFER)
             out += _take(it, per, "image")
         except RuntimeError as e:
             log.warning("skipping cauldron/%s: %s", sub, e)
@@ -165,6 +171,6 @@ def image_preference_pairs(cfg: Config) -> list[dict]:
             yield {"prompt": ex.get("question"), "image": ex["image"],
                    "chosen": ex["chosen"], "rejected": ex["rejected"]}
 
-    it = _first_working([("openbmb/RLAIF-V-Dataset", None, "train", m)], cfg.seed)
+    it = _first_working([("openbmb/RLAIF-V-Dataset", None, "train", m)], cfg.seed, IMAGE_BUFFER)
     rows = _take(it, cfg.n_image_pref, "image_pref")
     return rows
