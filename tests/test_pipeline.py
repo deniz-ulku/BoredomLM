@@ -19,8 +19,10 @@ def test_mappers():
     assert list(_map_messages({"messages": [{"role": "user", "content": "hi"}]})) == [{"prompt": "hi"}]
     assert list(_map_aya({"language": "Turkish", "inputs": "selam"})) == [{"prompt": "selam", "lang": "tr"}]
     assert list(_map_aya({"language": "German", "inputs": "hallo"})) == []
-    assert list(_map_cauldron({"images": ["img"], "texts": [{"user": "q?", "assistant": "a"}]})) == \
-        [{"prompt": "q?", "image": "img"}]
+    from PIL import Image
+
+    (row,) = _map_cauldron({"images": [Image.new("RGB", (8, 8))], "texts": [{"user": "q?", "assistant": "a"}]})
+    assert row["prompt"] == "q?" and row["image"]["bytes"][:2] == b"\xff\xd8"
     assert list(_map_cauldron({"images": ["a", "b"], "texts": [{"user": "q"}]})) == []
 
 
