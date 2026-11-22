@@ -70,4 +70,4 @@ pip install -e ".[dev]" && pytest
 
 ## License
 
-MIT for this code. The base model weights are Apache-2.0 (Qwen3.5).
+Proprietary, all rights reserved (see LICENSE). Third-party components keep their own licenses (see NOTICE); the base model weights are Apache-2.0 (Qwen3.5).

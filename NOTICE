@@ -1,0 +1,8 @@
+Candid includes or builds on the following third-party work:
+
+- Qwen3.5-4B model weights, Copyright (c) Alibaba Cloud, licensed under the Apache License 2.0.
+  Candid's trained model is a derivative work of these weights.
+  https://huggingface.co/Qwen/Qwen3.5-4B
+- llama.cpp (MIT License) via llama.rn (MIT License), used by the app for on-device inference.
+- Training and evaluation datasets are used under their own licenses and terms (see candid/sources.py
+  and candid/evaluate.py for the list).
