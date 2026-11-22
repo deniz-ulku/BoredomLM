@@ -25,6 +25,9 @@ class Store:
     def __init__(self, repo: str | None, run: str, work_dir: str, token: str | None = None):
         self.repo, self.run, self.work_dir = repo or None, run, work_dir
         self.token = token or os.environ.get("HF_TOKEN")
+        if self.repo and not self.token:
+            log.warning("CANDID_HUB_REPO is set but HF_TOKEN is not: working local-only")
+            self.repo = None
         self._files: set[str] | None = None
         os.makedirs(work_dir, exist_ok=True)
 
@@ -81,8 +84,16 @@ class Store:
 
     # ----- writes --------------------------------------------------------------
     def push(self, rel: str, message: str | None = None, replace: bool = False) -> None:
+        """Mirror <rel> to the Hub. Best effort: the local disk stays the source of truth, so a
+        failed upload is logged and retried with the next push instead of stopping the run."""
         if not self.repo:
             return
+        try:
+            self._push(rel, message, replace)
+        except Exception as e:  # noqa: BLE001
+            log.warning("upload of %s failed (will retry with the next push): %s", rel, e)
+
+    def _push(self, rel: str, message: str | None, replace: bool) -> None:
         path = self.local(rel)
         api, msg = self._api(), message or f"{self.run}: {rel}"
         if os.path.isdir(path):
@@ -93,6 +104,19 @@ class Store:
             api.upload_file(path_or_fileobj=path, path_in_repo=self.remote(rel), repo_id=self.repo,
                             commit_message=msg)
         self._files = None
+
+    def sync_up(self, rels) -> list[str]:
+        """Upload outputs that exist locally but not yet on the Hub (e.g. made before mirroring)."""
+        if not self.repo:
+            return []
+        missing = [r for r in rels if os.path.exists(self.local(r)) and not self._remote_has(r)]
+        for r in missing:
+            self.push(r, message=f"{self.run}: backfill {r}")
+        return missing
+
+    def _remote_has(self, rel: str) -> bool:
+        r = self.remote(rel)
+        return any(f == r or f.startswith(r + "/") for f in self._remote_files())
 
     def write_json(self, rel: str, obj, push: bool = True) -> None:
         path = self.local(rel)

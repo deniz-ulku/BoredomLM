@@ -233,3 +233,22 @@ def test_finished_run_never_restarts_leftovers():
     running_leftover = inst(7, status="running", label="candid-v0")
     acts, _ = d(5.0, [done, running_leftover], {})
     assert acts == [("stop", 7, "run already finished")]
+
+
+def test_store_without_token_is_local_only(tmp_path, monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    s = Store("someone/repo", "t", str(tmp_path / "runs" / "t"))
+    assert s.repo is None
+    s.write_json("a.json", {"x": 1})  # no network call, no error
+    assert s.read_json("a.json") == {"x": 1}
+
+
+def test_store_push_failure_does_not_raise(tmp_path, monkeypatch):
+    s = Store("someone/repo", "t", str(tmp_path / "runs" / "t"), token="x")
+
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(s, "_push", boom)
+    s.write_json("a.json", {"x": 1})  # logs a warning, keeps going
+    assert s.read_json("a.json") == {"x": 1}

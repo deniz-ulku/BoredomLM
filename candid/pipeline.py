@@ -79,6 +79,10 @@ def run(cfg: Config, store, fns=None) -> dict:
         fns = _DEFAULT
     real_fns = _stage_fns() if fns is _DEFAULT else fns
     store.ensure_repo()
+    backfilled = store.sync_up(["state.json", "prompts", "gen", "pairs", "ckpt", "adapter", "eval_base.json",
+                                "eval_tuned.json", "report.md", "gguf"])
+    if backfilled:
+        log.info("backed up to the Hub: %s", backfilled)
     state = store.state()
     stale = [st for st, out in STAGE_OUTPUTS.items() if st in state["done"] and not store.exists(out)]
     if stale:

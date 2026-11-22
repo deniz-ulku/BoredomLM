@@ -50,6 +50,7 @@ finish() {
 trap finish EXIT
 
 echo "[run] start $(date -u +%FT%TZ) instance=${CONTAINER_ID:-?} gpu=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
+echo "[run] hub repo: ${CANDID_HUB_REPO:-none}, HF_TOKEN set: $([[ -n "${HF_TOKEN:-}" ]] && echo yes || echo no)"
 command -v git >/dev/null && command -v cmake >/dev/null || \
   (apt-get update -qq && apt-get install -y -qq git cmake build-essential >/dev/null)
 
