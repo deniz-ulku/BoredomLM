@@ -51,6 +51,13 @@ trap finish EXIT
 
 echo "[run] start $(date -u +%FT%TZ) instance=${CONTAINER_ID:-?} gpu=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
 echo "[run] hub repo: ${CANDID_HUB_REPO:-none}, HF_TOKEN set: $([[ -n "${HF_TOKEN:-}" ]] && echo yes || echo no)"
+# Keep the disk for the current run: other runs' merged checkpoints and f16 GGUFs are large and
+# can be recreated from their adapters.
+for d in /workspace/work/runs/*/; do
+  [[ "$(basename "$d")" == "$CANDID_RUN" ]] && continue
+  rm -rf "$d/merged" "$d/ckpt" "$d"/gguf/*-f16.gguf 2>/dev/null || true
+done
+echo "[run] free disk: $(df -h --output=avail /workspace | tail -1 | tr -d ' ')"
 command -v git >/dev/null && command -v cmake >/dev/null || \
   (apt-get update -qq && apt-get install -y -qq git cmake build-essential >/dev/null)
 

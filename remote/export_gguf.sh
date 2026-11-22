@@ -15,9 +15,18 @@ cmake --build build --target llama-quantize -j "$(nproc)" >/dev/null
 "$PY" convert_hf_to_gguf.py "$W/merged" --outtype f16 --outfile "$OUT/candid-4b-f16.gguf"
 "$PY" convert_hf_to_gguf.py "$W/merged" --mmproj --outtype f16 --outfile "$OUT/candid-4b-mmproj-f16.gguf"
 
+# The first quant is the phone format and must succeed; later ones are extras that may fail
+# (e.g. on a full disk) without failing the export.
 IFS=',' read -ra QS <<< "$QUANTS"
-for q in "${QS[@]}"; do
-  ./build/bin/llama-quantize "$OUT/candid-4b-f16.gguf" "$OUT/candid-4b-$q.gguf" "$q"
+for i in "${!QS[@]}"; do
+  q="${QS[$i]}"
+  if ./build/bin/llama-quantize "$OUT/candid-4b-f16.gguf" "$OUT/candid-4b-$q.gguf.part" "$q"; then
+    mv "$OUT/candid-4b-$q.gguf.part" "$OUT/candid-4b-$q.gguf"
+  else
+    rm -f "$OUT/candid-4b-$q.gguf.part"
+    if [[ $i -eq 0 ]]; then echo "[export] $q failed"; exit 1; fi
+    echo "[export] optional $q failed (free disk: $(df -h --output=avail "$OUT" | tail -1)); skipping"
+  fi
 done
 rm -f "$OUT/candid-4b-f16.gguf"   # large and not needed on phones
 ls -lh "$OUT"

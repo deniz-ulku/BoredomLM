@@ -63,6 +63,22 @@ Instead, preference training (DPO + a small NLL term) on pairs whose both sides 
 - **Spec:** "keep all the substance; cut only filler" instead of "as short as possible".
 - **Gate:** 1,000 questions per capability benchmark; a benchmark fails when its drop exceeds both 1 point and the one-sided 95% noise band of the difference (about 2.2 points at 90% accuracy). Over-refusal must go down (500 prompts).
 
+### v1 result (passed the gate)
+
+1,000 questions per capability benchmark, 500 over-refusal prompts, 24 hard-limit prompts.
+
+| | base | v1 | gate |
+|---|---|---|---|
+| GSM8K | 92.0 | 90.9 | pass (allowed drop 2.1) |
+| MMLU-Pro | 59.4 | 58.7 | pass (allowed drop 3.6) |
+| Global-MMLU TR | 64.8 | 65.2 | pass |
+| ChartQA | 87.5 | 88.0 | pass |
+| Over-refusal, OR-Bench-Hard (lower is better) | 79.8 | 62.2 | pass |
+| Hard-limit refusal (CatQA + filter) | 95.8 | 95.8 | pass |
+| Emoji in style prompts | 12.5 | 8.3 | info |
+
+Capability held within noise, unnecessary refusals fell by 17.6 points, hard limits held. Over-refusal is still high in absolute terms; the next run can screen more prompts and add Turkish ones.
+
 Non-thinking mode only. Thinking mode stays as the base shipped it.
 
 ## Hard limits

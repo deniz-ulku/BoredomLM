@@ -303,6 +303,9 @@ def decide(credit: float, instances: list[dict], logs: dict, now: float, run: st
             summaries.append(f"finished on {iid} (gate {st.get('gate', '?')}); model is on its disk")
             continue
         if lab["kind"] == "failed":
+            if info is None:  # log not readable right now; decide on the next tick
+                summaries.append(f"{iid} failed; log unavailable, will check again")
+                continue
             stage = st.get("failed")
             fails = (st.get("failures") or {}).get(stage, 0) if stage else 0
             if stage and fails < 2 and have_credit:
