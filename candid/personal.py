@@ -13,6 +13,9 @@ Second run (lr 1e-4 / 2e-4, NLL 1.0): style and facts moved (terse 0 -> 100, for
 0 -> 73-80, facts 7 -> 73-100), but the terse user's adapter cut GSM8K from 90 to 80: it
 stopped showing work even when the prompt asked for it. Anchor pairs (below) target that.
 
+Third run (anchors): GSM8K held for every user (90-92.5); lr 2e-4 + 15 anchors kept most of
+the style (terse 93, formal_tr 73, facts 93) and is the recipe in docs/ON_DEVICE_LEARNING.md.
+
     CANDID_MODE=personal on the machine (see remote/run.sh), or python -m candid.personal
 """
 

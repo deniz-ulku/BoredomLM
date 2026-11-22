@@ -30,7 +30,8 @@ Batch: up to 64 new pairs plus 25% replay of older ones (`nightlyBatch`), so the
 Training, phone-sized:
 - LoRA rank 8, attention and MLP projections of the language model only; vision tower and DeltaNet gates frozen (as on the server).
 - Sequences cut to 512 tokens, batch 1, gradient checkpointing.
-- Loss: DPO (beta 0.1) + 0.2 NLL on chosen, reference = the frozen base with the adapter off. The KL anchor is what keeps a few dozen pairs from pulling the model off course.
+- Loss: DPO (beta 0.1) + 1.0 NLL on chosen, learning rate 2e-4, 3 epochs; reference = the frozen base with the adapter off (settings from the simulation in section 6).
+- Plus 15 anchor pairs: a worked answer to a math problem with a numeric answer over the same answer cut to its final line. They differ only in showing work, so they keep "think, then answer" working whatever style the user teaches. On the phone the worked answers come from the current model on the probe problems and are kept only when correct.
 - A few hundred steps at most; the run stops when the phone is unplugged and resumes the next night.
 
 ## 3. Safety check before an adapter is used
@@ -64,4 +65,19 @@ Go / no-go per platform from those numbers. iPhone first: MLX is the most mature
 
 ## 6. Server-side simulation (built: `candid/personal.py`)
 
-Before any phone work, the same loop runs on the training GPU under phone-like limits: synthetic users with a distinct style and personal facts, ~50 corrections each, rank-8 LoRA at 512 tokens on top of Candid v1. It reports how much style and personal facts move per night and whether capability holds, which sets the targets for the spike.
+Before any phone work, the same loop runs on the training GPU under phone-like limits: three synthetic users, 45 corrections each, rank-8 LoRA at 512 tokens on top of Candid v1, one adapter per user. Held-out questions measure whether answers now match the user; GSM8K (200 problems, base 90.0) measures whether capability holds. Users: **terse** (all lowercase, at most two sentences, no lists), **formal_tr** (always Turkish, formal "siz"), **facts** (peanut allergy, lives in İzmir, cat Pamuk; told in an earlier conversation, not in context, so they must come from the weights).
+
+| Setting | terse match / GSM8K | formal_tr match / GSM8K | facts match / GSM8K |
+|---|---|---|---|
+| lr 2e-5, NLL 0.2 (first plan) | 0 → 0 / 91.5 | 0 → 0 / 90.5 | (facts were in context) |
+| lr 1e-4, NLL 1.0 | 0 → 100 / **80.0** | 0 → 73 / 93.5 | 7 → 73 / 92.5 |
+| lr 2e-4, NLL 1.0 | 0 → 80 / **79.5** | 0 → 80 / 86.5 | 7 → 100 / 94.5 |
+| lr 1e-4, NLL 1.0, 15 anchors | 0 → 100 / 92.5 | 0 → 53 / 91.5 | 7 → 67 / 90.0 |
+| **lr 2e-4, NLL 1.0, 15 anchors** | 0 → 93 / 91.5 | 0 → 73 / 92.0 | 7 → 93 / 90.0 |
+
+Training took 45-60 s per user on an RTX 5090 (bf16). What it showed:
+- The first plan was too timid: the pairs were learned (reward accuracy 1.0) but greedy answers did not change.
+- With a usable learning rate the style and the facts move in one night, but a terse user's adapter also stopped the model showing its working on math, even when the prompt asked for it (GSM8K 90 → 80). The probe gate in section 3 would have rejected that adapter.
+- 15 anchor pairs remove the regression (GSM8K 90-92.5 for every user) at a small cost in style strength. lr 2e-4 with anchors is the chosen recipe (section 2).
+
+Targets for the phone spike: the same recipe on the 4-bit model should reach at least 70% match after one night with GSM8K-style probes within 2 of 30 of the current adapter.
