@@ -83,7 +83,11 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
     const ctx: ToolContext = { searxngUrl: settings.searxngUrl, lang: guessLang(last?.text ?? ""), sources: [] };
 
     const onEvent = (e: LoopEvent | { kind: "attempt"; index: number; total: number }) => {
-      if (e.kind === "text") setLive(e.text);
+      if (e.kind === "text") {
+        setLive(e.text);
+        setStatus((s) => (s === S.thinkingNow ? "" : s));
+      }
+      if (e.kind === "thinking") setStatus((s) => s || S.thinkingNow);
       if (e.kind === "attempt") {
         setLive("");
         setStatus(`${S.attempt} ${e.index}/${e.total}`);

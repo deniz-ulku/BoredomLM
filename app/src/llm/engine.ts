@@ -44,7 +44,7 @@ export async function loadEngine(
     vision = await ctx.initMultimodal({ path: mmprojPath, use_gpu: true });
   }
 
-  const complete: CompleteFn = async ({ messages, tools, onText, thinking: thinkOverride }) => {
+  const complete: CompleteFn = async ({ messages, tools, onText, onThinking, thinking: thinkOverride }) => {
     const thinking = thinkOverride ?? opts.thinking;
     const res = await ctx.completion(
       {
@@ -54,6 +54,11 @@ export async function loadEngine(
         tools: tools ? [...tools] : undefined,
         tool_choice: tools ? "auto" : undefined,
         jinja: true,
+        // Both are needed: llama.rn's enable_thinking defaults to true and drives the output parser,
+        // while the template reads chat_template_kwargs. "auto" moves <think> blocks (also the empty
+        // one the template opens with) out of content, so the user never sees the tags.
+        enable_thinking: thinking,
+        reasoning_format: "auto",
         n_predict: thinking ? 6144 : opts.maxTokens ?? 2048, // reasoning needs room
         temperature: thinking ? 0.6 : 0.7,
         top_p: thinking ? 0.95 : 0.8,
@@ -61,7 +66,8 @@ export async function loadEngine(
         chat_template_kwargs: { enable_thinking: thinking },
       },
       (data) => {
-        if (onText && typeof data.content === "string") onText(data.content);
+        if (onText && typeof data.content === "string" && data.content) onText(data.content);
+        else if (onThinking && data.reasoning_content) onThinking();
       },
     );
     return { content: res.content, text: res.text, tool_calls: res.tool_calls };

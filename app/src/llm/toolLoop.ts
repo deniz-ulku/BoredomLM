@@ -22,12 +22,15 @@ export type CompleteFn = (args: {
   tools?: readonly object[];
   /** Visible answer text so far (tool-call markup excluded), called as it streams. */
   onText?: (textSoFar: string) => void;
+  /** Called while the model is still reasoning and has no visible text yet. */
+  onThinking?: () => void;
   /** Override the engine's thinking setting for this call. */
   thinking?: boolean;
 }) => Promise<CompletionResult>;
 
 export type LoopEvent =
   | { kind: "text"; text: string }
+  | { kind: "thinking" }
   | { kind: "tool"; name: string; args: string }
   | { kind: "tool_result"; name: string; chars: number };
 
@@ -57,11 +60,13 @@ export async function runChat(opts: LoopOptions): Promise<{ answer: string; mess
       messages,
       tools: useTools,
       onText: (text) => onEvent?.({ kind: "text", text }),
+      onThinking: () => onEvent?.({ kind: "thinking" }),
       thinking: opts.thinking,
     });
     const calls = useTools && !opts.shouldStop?.() ? (res.tool_calls ?? []).filter((c) => c?.function?.name) : [];
     if (calls.length === 0) {
-      const answer = (res.content || res.text || "").trim();
+      // res.text is the raw output: drop reasoning (closed or cut off) if it is the fallback.
+      const answer = (res.content || stripThink(res.text || "")).trim();
       messages.push({ role: "assistant", content: answer });
       return { answer, messages };
     }
@@ -74,4 +79,9 @@ export async function runChat(opts: LoopOptions): Promise<{ answer: string; mess
       messages.push({ role: "tool", name: call.function.name, tool_call_id: call.id, content: result });
     }
   }
+}
+
+/** Remove <think> blocks, including one left open when generation stopped mid-thought. */
+export function stripThink(text: string): string {
+  return text.replace(/<think>[\s\S]*?(<\/think>|$)/g, "");
 }

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { extractText, normalizeUrl, parseDuckDuckGo } from "../src/search/html";
 import { search, type Provider, wikipedia } from "../src/search/providers";
 import { runTool, type ToolContext } from "../src/search/tools";
-import { runChat, type CompleteFn } from "../src/llm/toolLoop";
+import { runChat, stripThink, type CompleteFn } from "../src/llm/toolLoop";
 import { buildSystemPrompt } from "../src/llm/prompt";
 import { buildStyleProfile, styleStats, usableSamples } from "../src/style/imitate";
 
@@ -185,5 +185,20 @@ describe("citations and language", () => {
   it("has the same keys in both languages", () => {
     expect(Object.keys(stringsFor("tr-TR")).sort()).toEqual(Object.keys(stringsFor("en-US")).sort());
     expect(stringsFor("tr-TR").send).toBe("Gönder");
+  });
+});
+
+describe("thinking output", () => {
+  it("never shows reasoning tags, even from a stopped generation", async () => {
+    expect(stripThink("<think>\n\n</think>\n\nHi")).toBe("\n\nHi");
+    expect(stripThink("<think>half a thought")).toBe("");
+    const complete: CompleteFn = async ({ onThinking }) => {
+      onThinking?.();
+      return { content: "", text: "<think>working on it" };
+    };
+    const events: string[] = [];
+    const out = await runChat({ complete, messages: [], onEvent: (e) => events.push(e.kind) });
+    expect(out.answer).toBe("");
+    expect(events).toContain("thinking");
   });
 });
