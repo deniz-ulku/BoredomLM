@@ -15,14 +15,16 @@ export type ModelSpec = {
 };
 
 const HF = "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/";
+// The trained model, exported by the training pipeline into the (private) Candid repo.
+const CANDID = "https://huggingface.co/Denizulkuu/candid/resolve/main/runs/v1/gguf/";
 
 export const CATALOG: ModelSpec[] = [
   {
     id: "candid-4b",
     name: "Candid 4B",
-    description: "Our trained model. Import the two .gguf files from the training run.",
-    model: { filename: "candid-4b-Q4_K_M.gguf", url: "", bytes: 2_741_241_728 },
-    mmproj: { filename: "candid-4b-mmproj-f16.gguf", url: "", bytes: 672_422_944 },
+    description: "Our trained model. Downloads from the private Candid repo (needs a Hugging Face token in Settings), or import the two .gguf files.",
+    model: { filename: "candid-4b-Q4_K_M.gguf", url: CANDID + "candid-4b-Q4_K_M.gguf", bytes: 2_741_241_728 },
+    mmproj: { filename: "candid-4b-mmproj-f16.gguf", url: CANDID + "candid-4b-mmproj-f16.gguf", bytes: 672_422_944 },
   },
   {
     id: "qwen3.5-4b",
@@ -54,6 +56,7 @@ export async function download(
   spec: ModelSpec,
   onProgress: (fraction: number) => void,
   signal?: AbortSignal,
+  hfToken?: string | null,
 ): Promise<void> {
   const parts = [spec.model, spec.mmproj].filter((p): p is ModelFile => Boolean(p));
   if (parts.some((p) => !p.url)) throw new Error("This model has no download link yet. Import its files instead.");
@@ -67,9 +70,12 @@ export async function download(
     }
     const tmp = new File(modelsDir(), dest.name + ".part");
     if (tmp.exists) tmp.delete();
+    const headers: Record<string, string> =
+      hfToken && part.url.startsWith("https://huggingface.co/") ? { Authorization: `Bearer ${hfToken}` } : {};
     await File.downloadFileAsync(part.url, tmp, {
       idempotent: true,
       signal,
+      headers,
       onProgress: ({ bytesWritten }) => onProgress(Math.min(1, (done + bytesWritten) / total)),
     });
     tmp.moveSync(dest);

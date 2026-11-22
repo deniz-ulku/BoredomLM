@@ -2,7 +2,7 @@ import * as ImagePicker from "expo-image-picker";
 import { File } from "expo-file-system";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator, FlatList, Image, KeyboardAvoidingView, Linking, Platform, Pressable, StyleSheet, Text,
+  ActivityIndicator, FlatList, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, StyleSheet, Text,
   TextInput, View,
 } from "react-native";
 
@@ -10,11 +10,13 @@ import { toChatMessage, type Engine } from "../llm/engine";
 import { buildSystemPrompt } from "../llm/prompt";
 import { deepThink } from "../llm/deepThink";
 import { runChat, type ChatMessage, type LoopEvent } from "../llm/toolLoop";
+import { makePair, regenerationPairs, type PromptTurn } from "../learn/pairs";
 import { citedSources, guessLang } from "../search/citations";
 import { runTool, TOOLS, type ToolContext } from "../search/tools";
 import { buildStyleProfile } from "../style/imitate";
 import { appDir } from "../store/files";
 import { loadConversation, newId, saveConversation, type UiMessage } from "../store/history";
+import { savePair, savePairs } from "../store/learning";
 import type { Settings } from "../store/settings";
 import { S } from "./strings";
 import { useTheme, type Theme } from "./theme";
@@ -55,14 +57,10 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
     setImages((prev) => [...prev, ...kept]);
   }, []);
 
-  const send = useCallback(async () => {
-    const text = input.trim();
-    if (!engine || busy || (!text && images.length === 0)) return;
-    const userMsg: UiMessage = { id: newId(), role: "user", text, images, createdAt: Date.now() };
-    const history = [...messages, userMsg];
-    setMessages(history);
-    setInput("");
-    setImages([]);
+  /** Answer the last user message of `history` and append the reply. */
+  const respond = useCallback(async (history: UiMessage[], versions?: string[]) => {
+    if (!engine) return;
+    const last = history[history.length - 1];
     setBusy(true);
     setLive("");
     setStatus("");
@@ -78,7 +76,7 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
       ...recent.map((m) => toChatMessage(m.role, m.text || S.photo,
         engine.vision && withImages.has(m.id) ? m.images : [])),
     ];
-    const ctx: ToolContext = { searxngUrl: settings.searxngUrl, lang: guessLang(text), sources: [] };
+    const ctx: ToolContext = { searxngUrl: settings.searxngUrl, lang: guessLang(last?.text ?? ""), sources: [] };
 
     const onEvent = (e: LoopEvent | { kind: "attempt"; index: number; total: number }) => {
       if (e.kind === "text") setLive(e.text);
@@ -110,12 +108,49 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
       answer = `${S.failed}: ${(e as Error).message}`;
     }
     const cited = citedSources(answer, ctx.sources);
-    setMessages((prev) => [...prev, { id: newId(), role: "assistant", text: answer, images: [],
-      sources: cited, deep: deepMeta, createdAt: Date.now() }]);
+    setMessages([...history, { id: newId(), role: "assistant", text: answer, images: [], sources: cited,
+      deep: deepMeta, versions, createdAt: Date.now() }]);
     setBusy(false);
     setLive("");
     setStatus("");
-  }, [engine, busy, input, images, messages, settings, deep]);
+  }, [engine, settings, deep]);
+
+  const send = useCallback(async () => {
+    const text = input.trim();
+    if (!engine || busy || (!text && images.length === 0)) return;
+    // Moving on after regenerating means the shown version was kept: learn it over the replaced ones.
+    const prev = messages[messages.length - 1];
+    if (settings.learnFromMe && prev?.role === "assistant" && prev.versions?.length) {
+      savePairs(regenerationPairs(toTurns(messages.slice(0, -1)), prev.versions, prev.text, Date.now(), newId));
+    }
+    const history = [...messages.map((m) => (m === prev ? { ...m, versions: undefined } : m)),
+      { id: newId(), role: "user" as const, text, images, createdAt: Date.now() }];
+    setMessages(history);
+    setInput("");
+    setImages([]);
+    await respond(history);
+  }, [engine, busy, input, images, messages, settings, respond]);
+
+  const regenerate = useCallback(async () => {
+    const prev = messages[messages.length - 1];
+    if (!engine || busy || prev?.role !== "assistant") return;
+    const history = messages.slice(0, -1);
+    setMessages(history);
+    await respond(history, [...(prev.versions ?? []), prev.text]);
+  }, [engine, busy, messages, respond]);
+
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const saveEdit = useCallback(() => {
+    if (!editing) return;
+    const i = messages.findIndex((m) => m.id === editing.id);
+    if (i < 0) return setEditing(null);
+    const old = messages[i];
+    if (settings.learnFromMe) {
+      savePair(makePair("edit", toTurns(messages.slice(0, i)), editing.text, old.text, Date.now(), newId()));
+    }
+    setMessages(messages.map((m) => (m.id === editing.id ? { ...m, text: editing.text.trim(), edited: true } : m)));
+    setEditing(null);
+  }, [editing, messages, settings.learnFromMe]);
 
   if (!engine) {
     return (
@@ -135,7 +170,11 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
         keyExtractor={(m) => m.id}
         contentContainerStyle={s.list}
         onContentSizeChange={() => list.current?.scrollToEnd({ animated: true })}
-        renderItem={({ item }) => <Bubble m={item} t={t} />}
+        renderItem={({ item, index }) => (
+          <Bubble m={item} t={t} onEdit={item.role === "assistant" && !busy
+            ? () => setEditing({ id: item.id, text: item.text }) : undefined}
+            onRegenerate={!busy && item.role === "assistant" && index === messages.length - 1 ? regenerate : undefined} />
+        )}
         ListFooterComponent={busy ? (
           <View style={s.assistant}>
             {status ? <Text style={s.status}>{status}</Text> : null}
@@ -177,14 +216,32 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
           <Pressable style={s.send} onPress={send}><Text style={s.primaryText}>{S.send}</Text></Pressable>
         )}
       </View>
+      <Modal visible={editing !== null} animationType="slide" onRequestClose={() => setEditing(null)}>
+        <View style={[s.fill, s.editor]}>
+          <Text style={s.title}>{S.editTitle}</Text>
+          <Text style={s.status}>{settings.learnFromMe ? S.editHintLearn : S.editHint}</Text>
+          <TextInput style={[s.input, s.editInput]} value={editing?.text ?? ""} multiline autoFocus
+            onChangeText={(text) => setEditing((e) => (e ? { ...e, text } : e))} />
+          <View style={s.row}>
+            <Pressable style={s.iconBtn} onPress={() => setEditing(null)}><Text style={s.iconText}>{S.cancel}</Text></Pressable>
+            <Pressable style={s.send} onPress={saveEdit}><Text style={s.primaryText}>{S.save}</Text></Pressable>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
 
-function Bubble({ m, t }: { m: UiMessage; t: Theme }) {
+function toTurns(messages: UiMessage[]): PromptTurn[] {
+  return messages.map((m) => ({ role: m.role, content: m.text || S.photo }));
+}
+
+type BubbleProps = { m: UiMessage; t: Theme; onEdit?: () => void; onRegenerate?: () => void };
+
+function Bubble({ m, t, onEdit, onRegenerate }: BubbleProps) {
   const s = styles(t);
   return (
-    <View style={m.role === "user" ? s.user : s.assistant}>
+    <Pressable onLongPress={onEdit} delayLongPress={350} style={m.role === "user" ? s.user : s.assistant}>
       {m.images.length > 0 && (
         <View style={s.pending}>{m.images.map((u) => <Image key={u} source={{ uri: u }} style={s.thumb} />)}</View>
       )}
@@ -199,7 +256,13 @@ function Bubble({ m, t }: { m: UiMessage; t: Theme }) {
           [{src.n}] {src.title || src.url}
         </Text>
       ))}
-    </View>
+      {m.role === "assistant" && (onRegenerate || m.edited) ? (
+        <View style={s.row}>
+          {m.edited ? <Text style={s.status}>{S.edited}</Text> : null}
+          {onRegenerate ? <Text style={s.action} onPress={onRegenerate}>{S.regenerate}</Text> : null}
+        </View>
+      ) : null}
+    </Pressable>
   );
 }
 
@@ -233,6 +296,10 @@ const styles = (t: Theme) => StyleSheet.create({
   iconBtnOn: { backgroundColor: t.accent, borderColor: t.accent },
   iconTextOn: { color: t.accentText, fontWeight: "600" },
   warn: { color: t.danger },
+  row: { flexDirection: "row", alignItems: "center", gap: 12 },
+  action: { color: t.accent, fontSize: 13, paddingVertical: 4 },
+  editor: { padding: 16, paddingTop: 56, gap: 12 },
+  editInput: { flex: 1, maxHeight: undefined, textAlignVertical: "top" },
   send: { height: 40, paddingHorizontal: 14, borderRadius: 10, justifyContent: "center", backgroundColor: t.accent },
   primary: { paddingHorizontal: 18, paddingVertical: 12, borderRadius: 10, backgroundColor: t.accent },
   primaryText: { color: t.accentText, fontWeight: "600" },

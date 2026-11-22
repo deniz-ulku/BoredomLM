@@ -8,6 +8,8 @@ export type Settings = {
   imitateMe: boolean;
   /** Qwen3.5 thinking mode for hard questions: slower, more accurate. */
   thinking: boolean;
+  /** Keep corrections and kept regenerations on the phone as training pairs for nightly learning. */
+  learnFromMe: boolean;
   activeModelId: string | null;
 };
 
@@ -16,6 +18,7 @@ export const DEFAULT_SETTINGS: Settings = {
   searxngUrl: "",
   imitateMe: false,
   thinking: false,
+  learnFromMe: true,
   activeModelId: null,
 };
 

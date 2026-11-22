@@ -4,6 +4,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import {
   CATALOG, download, freeSpace, importFiles, isInstalled, remove, spaceNeeded, type ModelSpec,
 } from "../store/models";
+import { getHfToken } from "../store/secrets";
 import { S } from "./strings";
 import { useTheme, type Theme } from "./theme";
 
@@ -26,7 +27,7 @@ export function ModelsScreen({ activeId, loading, onUse }: Props) {
     aborts.current[spec.id] = ctrl;
     say(spec.id, "");
     try {
-      await download(spec, (f) => setProgress((p) => ({ ...p, [spec.id]: f })), ctrl.signal);
+      await download(spec, (f) => setProgress((p) => ({ ...p, [spec.id]: f })), ctrl.signal, await getHfToken());
     } catch (e) {
       say(spec.id, (e as Error).message);
     } finally {

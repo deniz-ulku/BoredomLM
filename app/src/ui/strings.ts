@@ -16,6 +16,12 @@ const en = {
   clearChat: "Clear conversation", photo: "(photo)",
   deep: "Deep", attempt: "Solving", agreedOf: "of", agreedTail: "solutions agree",
   notAgreed: "The solutions disagree; check this answer.",
+  regenerate: "Regenerate", edited: "Edited", save: "Save", editTitle: "Correct this answer",
+  editHint: "Your version replaces the answer.",
+  editHintLearn: "Your version replaces the answer, and Candid learns from it tonight, on this phone.",
+  learn: "Learn from me", learnHint: "Corrections and kept regenerations stay on this phone and train your own copy of Candid while it charges.",
+  learnCount: "examples collected", clearLearning: "Delete learning data",
+  hfToken: "Hugging Face token (for private models)",
 };
 
 const tr: typeof en = {
@@ -34,6 +40,12 @@ const tr: typeof en = {
   clearChat: "Sohbeti temizle", photo: "(fotoğraf)",
   deep: "Derin", attempt: "Çözülüyor", agreedOf: "/", agreedTail: "çözüm aynı sonuca vardı",
   notAgreed: "Çözümler farklı sonuçlara vardı; bu cevabı kontrol et.",
+  regenerate: "Yeniden üret", edited: "Düzeltildi", save: "Kaydet", editTitle: "Bu cevabı düzelt",
+  editHint: "Senin yazdığın cevabın yerine geçer.",
+  editHintLearn: "Senin yazdığın cevabın yerine geçer ve Candid bu gece, bu telefonda ondan öğrenir.",
+  learn: "Benden öğren", learnHint: "Düzeltmelerin ve tuttuğun yeniden üretimler bu telefonda kalır ve şarjdayken kendi Candid kopyanı eğitir.",
+  learnCount: "örnek toplandı", clearLearning: "Öğrenme verisini sil",
+  hfToken: "Hugging Face token'ı (özel modeller için)",
 };
 
 export type Strings = typeof en;

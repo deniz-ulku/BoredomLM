@@ -10,6 +10,10 @@ export type UiMessage = {
   sources?: Source[];
   /** Deep think result: how many independent solutions agreed. */
   deep?: { support: number; total: number; agreed: boolean };
+  /** Earlier answers to the same message the user replaced with "regenerate". */
+  versions?: string[];
+  /** The user corrected this answer. */
+  edited?: boolean;
   createdAt: number;
 };
 

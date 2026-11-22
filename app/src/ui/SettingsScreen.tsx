@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 
+import { clearPairs, loadPairs } from "../store/learning";
+import { getHfToken, setHfToken } from "../store/secrets";
 import type { Settings } from "../store/settings";
 import { S } from "./strings";
 import { useTheme, type Theme } from "./theme";
@@ -10,6 +13,11 @@ export function SettingsScreen({ settings, onChange, onClearChat }: Props) {
   const t = useTheme();
   const s = styles(t);
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => onChange({ ...settings, [k]: v });
+  const [learned, setLearned] = useState(() => loadPairs().length);
+  const [token, setToken] = useState("");
+  useEffect(() => {
+    getHfToken().then((v) => setToken(v ?? "")).catch(() => undefined);
+  }, []);
 
   return (
     <ScrollView style={s.fill} contentContainerStyle={s.page}>
@@ -34,6 +42,27 @@ export function SettingsScreen({ settings, onChange, onClearChat }: Props) {
         onChange={(v) => set("imitateMe", v)} />
       <Toggle t={t} label={S.thinking} hint={S.thinkingHint} value={settings.thinking}
         onChange={(v) => set("thinking", v)} />
+      <Toggle t={t} label={S.learn} hint={`${S.learnHint} ${learned} ${S.learnCount}.`} value={settings.learnFromMe}
+        onChange={(v) => set("learnFromMe", v)} />
+      {learned > 0 && (
+        <Pressable style={s.danger} onPress={() => (clearPairs(), setLearned(0))} accessibilityRole="button">
+          <Text style={s.dangerText}>{S.clearLearning}</Text>
+        </Pressable>
+      )}
+      <View style={s.item}>
+        <Text style={s.label}>{S.hfToken}</Text>
+        <TextInput
+          style={s.input}
+          value={token}
+          onChangeText={setToken}
+          onEndEditing={() => setHfToken(token).catch(() => undefined)}
+          placeholder="hf_..."
+          placeholderTextColor={t.muted}
+          autoCapitalize="none"
+          autoCorrect={false}
+          secureTextEntry
+        />
+      </View>
       <Pressable style={s.danger} onPress={onClearChat} accessibilityRole="button">
         <Text style={s.dangerText}>{S.clearChat}</Text>
       </Pressable>
