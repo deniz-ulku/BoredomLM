@@ -259,8 +259,11 @@ def parse_label(label: str, base: str) -> dict:
 
 
 def decide(credit: float, instances: list[dict], logs: dict, now: float, run: str,
-           min_credit: float) -> tuple[list[tuple[str, int | None, str]], str]:
+           min_credit: float, hub_done: bool = False) -> tuple[list[tuple[str, int | None, str]], str]:
     """Pure decision step. Returns ([(action, instance_id, detail)], summary).
+
+    hub_done: the run is finished and fully backed up on the Hub, with no redo or experiment
+    pending (see hub_finished). Then no machine is needed: a stopped one only costs disk rent.
 
     Actions: start, stop, destroy, launch, rescue (launch a machine to receive <id>'s data),
     copy (have vast.ai copy the source given in detail into <id>), label:<new label>.
@@ -274,6 +277,8 @@ def decide(credit: float, instances: list[dict], logs: dict, now: float, run: st
     actions: list[tuple[str, int | None, str]] = []
 
     if not mine:
+        if hub_done:
+            return [], "finished; model and data are on the Hub (no machine kept)"
         if have_credit:
             return [("launch", None, f"credit ${credit:.2f}")], "launching a new machine"
         return [], f"waiting for credit (have ${credit:.2f}, need > ${min_credit:.2f})"
@@ -285,6 +290,12 @@ def decide(credit: float, instances: list[dict], logs: dict, now: float, run: st
         for i in stray:
             if (i.get("actual_status") or "").lower() == "running":
                 actions.append(("stop", i["id"], "run already finished"))
+        if hub_done:
+            idle = [i["id"] for i in mine if i["id"] in done
+                    and (i.get("actual_status") or "").lower() in ("exited", "stopped")]
+            actions += [("destroy", iid, "finished and backed up on the Hub; stops disk rent") for iid in idle]
+            if idle:
+                return actions, f"finished; everything is on the Hub, removing idle machine(s) {idle}"
         return actions, f"finished on {done[0]}; model is on its disk" + (
             f" ({len(stray)} leftover machine(s) left untouched)" if stray else "")
 
@@ -440,15 +451,42 @@ def wait_running(v, iid: int, minutes: float) -> bool:
     return False
 
 
+def hub_finished(repo: str | None, run: str, overrides: dict[str, str]) -> bool:
+    """True when the Hub holds the finished run (state says finished, GGUF uploaded) and the
+    RUN file asks for nothing more (no experiment mode, no redo not yet applied). Any doubt,
+    including a failed read, is False: then the machine is kept."""
+    if not repo or overrides.get("mode"):
+        return False
+    try:
+        import json
+
+        from huggingface_hub import HfApi, hf_hub_download
+
+        with open(hf_hub_download(repo, f"runs/{run}/state.json")) as f:
+            state = json.load(f)
+        redo = [x for x in overrides.get("redo", "").split(",") if x]
+        if not state.get("finished") or "export" not in state.get("done", []):
+            return False
+        if redo and state.get("redo_applied") != redo:
+            return False
+        return any(p.startswith(f"runs/{run}/gguf/") and p.endswith(".gguf")
+                   for p in HfApi().list_repo_files(repo))
+    except Exception as e:  # noqa: BLE001
+        print(f"(could not read the run state from the Hub: {e})")
+        return False
+
+
 def tick(a) -> str:
     v = vast()
     credit = float(v.show_user().get("credit") or 0)
     instances = v.show_instances()
     logs = {i["id"]: read_log(v, i["id"]) for i in instances
             if (i.get("label") or "").startswith(f"candid-{a.run}")}
-    actions, summary = decide(credit, instances, logs, time.time(), a.run, a.min_credit)
     overrides = dict(kv.split("=", 1) for kv in a.set or [])
-    hub = {**run_overrides(), **overrides}.get("hub_repo")
+    cfg = {**run_overrides(), **overrides}
+    hub = cfg.get("hub_repo")
+    actions, summary = decide(credit, instances, logs, time.time(), a.run, a.min_credit,
+                              hub_done=hub_finished(hub, a.run, cfg))
     if hub and any(act in ("start", "launch", "rescue") for act, _, _ in actions):
         try:  # machines fetch code from the Hub at start, so it must be current before any start
             push_code(hub)

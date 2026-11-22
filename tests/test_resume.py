@@ -80,8 +80,8 @@ def inst(iid, status="running", age_min=60, label="candid-v0", intended="running
             "start_date": NOW - age_min * 60}
 
 
-def d(credit, instances, logs=None, min_credit=0.10):
-    return launch.decide(credit, instances, logs or {}, NOW, "v0", min_credit)
+def d(credit, instances, logs=None, min_credit=0.10, hub_done=False):
+    return launch.decide(credit, instances, logs or {}, NOW, "v0", min_credit, hub_done)
 
 
 def test_parse_log():
@@ -233,6 +233,18 @@ def test_finished_run_never_restarts_leftovers():
     running_leftover = inst(7, status="running", label="candid-v0")
     acts, _ = d(5.0, [done, running_leftover], {})
     assert acts == [("stop", 7, "run already finished")]
+
+
+def test_finished_run_on_the_hub_keeps_no_machine():
+    done = inst(8, status="exited", label="candid-v0-done")
+    acts, summary = d(5.0, [done], {}, hub_done=True)
+    assert acts == [("destroy", 8, "finished and backed up on the Hub; stops disk rent")]
+    acts, summary = d(5.0, [], {}, hub_done=True)  # and does not launch a new one
+    assert acts == [] and "on the Hub" in summary
+    acts, _ = d(5.0, [inst(8, status="running", label="candid-v0-done")], {}, hub_done=True)
+    assert acts == []  # a running machine (e.g. an experiment) is never destroyed
+    acts, _ = d(5.0, [done], {}, hub_done=False)
+    assert acts == []  # without a confirmed Hub copy the machine stays
 
 
 def test_store_without_token_is_local_only(tmp_path, monkeypatch):
