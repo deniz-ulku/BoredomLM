@@ -8,6 +8,12 @@ An assistant that runs on your phone and answers plainly.
 - **Plain answers.** No emojis, no filler, no lectures, no refusals except two narrow hard limits.
 - **Does not assume.** If missing information would change the answer, it asks one short question. Otherwise it just answers.
 
+## What makes it different
+
+1. **It learns its user, on the phone.** Corrections and kept regenerations become training pairs on the device, and a small LoRA trains on them overnight while the phone charges, with a safety check before it is used. Each user ends up with their own model. Cloud assistants cannot do per-user nightly training at scale. Design: [docs/ON_DEVICE_LEARNING.md](docs/ON_DEVICE_LEARNING.md).
+2. **It can think as long as a problem needs.** Extra tokens cost the phone only battery, so hard questions get several independent solutions, checked with tools and voted on.
+3. **No limits, no lectures.** Unlimited photos and messages, plain answers, refusals only at two narrow hard limits.
+
 ## Model
 
 Candid v0 is [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) (Apache-2.0, natively multimodal, 3:1 Gated DeltaNet / attention hybrid) with our own preference training on top. The training changes behaviour only; the gate in `candid/evaluate.py` rejects any run that loses more than one point on math, knowledge, Turkish or chart-reading benchmarks.
