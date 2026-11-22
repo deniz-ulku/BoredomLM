@@ -22,6 +22,8 @@ export type CompleteFn = (args: {
   tools?: readonly object[];
   /** Visible answer text so far (tool-call markup excluded), called as it streams. */
   onText?: (textSoFar: string) => void;
+  /** Override the engine's thinking setting for this call. */
+  thinking?: boolean;
 }) => Promise<CompletionResult>;
 
 export type LoopEvent =
@@ -37,6 +39,7 @@ export type LoopOptions = {
   maxRounds?: number;
   onEvent?: (e: LoopEvent) => void;
   maxToolChars?: number;
+  thinking?: boolean;
 };
 
 /** Returns the final answer text and the full message list including tool turns. */
@@ -52,6 +55,7 @@ export async function runChat(opts: LoopOptions): Promise<{ answer: string; mess
       messages,
       tools: useTools,
       onText: (text) => onEvent?.({ kind: "text", text }),
+      thinking: opts.thinking,
     });
     const calls = useTools ? (res.tool_calls ?? []).filter((c) => c?.function?.name) : [];
     if (calls.length === 0) {

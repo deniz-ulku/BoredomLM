@@ -8,6 +8,8 @@ export type UiMessage = {
   /** file:// URIs of attached photos (copied into app storage). */
   images: string[];
   sources?: Source[];
+  /** Deep think result: how many independent solutions agreed. */
+  deep?: { support: number; total: number; agreed: boolean };
   createdAt: number;
 };
 

@@ -8,7 +8,8 @@ import {
 
 import { toChatMessage, type Engine } from "../llm/engine";
 import { buildSystemPrompt } from "../llm/prompt";
-import { runChat, type ChatMessage } from "../llm/toolLoop";
+import { deepThink } from "../llm/deepThink";
+import { runChat, type ChatMessage, type LoopEvent } from "../llm/toolLoop";
 import { citedSources, guessLang } from "../search/citations";
 import { runTool, TOOLS, type ToolContext } from "../search/tools";
 import { buildStyleProfile } from "../style/imitate";
@@ -32,6 +33,7 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
   const [busy, setBusy] = useState(false);
   const [live, setLive] = useState("");
   const [status, setStatus] = useState("");
+  const [deep, setDeep] = useState(false);
   const list = useRef<FlatList<UiMessage>>(null);
 
   useEffect(() => saveConversation(messages), [messages]);
@@ -78,32 +80,42 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
     ];
     const ctx: ToolContext = { searxngUrl: settings.searxngUrl, lang: guessLang(text), sources: [] };
 
+    const onEvent = (e: LoopEvent | { kind: "attempt"; index: number; total: number }) => {
+      if (e.kind === "text") setLive(e.text);
+      if (e.kind === "attempt") {
+        setLive("");
+        setStatus(`${S.attempt} ${e.index}/${e.total}`);
+      }
+      if (e.kind === "tool" && e.name !== "calculate") {
+        setLive("");
+        setStatus(e.name === "web_search" ? `${S.searching}: ${safeArg(e.args, "query")}` : `${S.reading}: ${safeArg(e.args, "url")}`);
+      }
+    };
+    const tools = settings.searchEnabled ? TOOLS : undefined;
+    const toolRunner = (name: string, args: string) => runTool(name, args, ctx);
+
     let answer = "";
+    let deepMeta: UiMessage["deep"];
     try {
-      const out = await runChat({
-        complete: engine.complete,
-        messages: chat,
-        tools: settings.searchEnabled ? TOOLS : undefined,
-        runTool: (name, args) => runTool(name, args, ctx),
-        onEvent: (e) => {
-          if (e.kind === "text") setLive(e.text);
-          if (e.kind === "tool") {
-            setLive("");
-            setStatus(e.name === "web_search" ? `${S.searching}: ${safeArg(e.args, "query")}` : `${S.reading}: ${safeArg(e.args, "url")}`);
-          }
-        },
-      });
-      answer = out.answer;
+      if (deep) {
+        const res = await deepThink({ complete: engine.complete, messages: chat, attempts: 3, tools,
+          runTool: toolRunner, onEvent });
+        answer = res.answer;
+        deepMeta = { support: res.support, total: res.total, agreed: res.agreed };
+      } else {
+        answer = (await runChat({ complete: engine.complete, messages: chat, tools, runTool: toolRunner, onEvent }))
+          .answer;
+      }
     } catch (e) {
       answer = `${S.failed}: ${(e as Error).message}`;
     }
     const cited = citedSources(answer, ctx.sources);
     setMessages((prev) => [...prev, { id: newId(), role: "assistant", text: answer, images: [],
-      sources: cited, createdAt: Date.now() }]);
+      sources: cited, deep: deepMeta, createdAt: Date.now() }]);
     setBusy(false);
     setLive("");
     setStatus("");
-  }, [engine, busy, input, images, messages, settings]);
+  }, [engine, busy, input, images, messages, settings, deep]);
 
   if (!engine) {
     return (
@@ -147,6 +159,10 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
         <Pressable style={s.iconBtn} onPress={() => addPhotos(false)} accessibilityLabel={S.photos}>
           <Text style={s.iconText}>{S.photos}</Text>
         </Pressable>
+        <Pressable style={[s.iconBtn, deep && s.iconBtnOn]} onPress={() => setDeep((d) => !d)}
+          accessibilityRole="switch" accessibilityState={{ checked: deep }} accessibilityLabel={S.deep}>
+          <Text style={[s.iconText, deep && s.iconTextOn]}>{S.deep}</Text>
+        </Pressable>
         <TextInput
           style={s.input}
           value={input}
@@ -173,6 +189,11 @@ function Bubble({ m, t }: { m: UiMessage; t: Theme }) {
         <View style={s.pending}>{m.images.map((u) => <Image key={u} source={{ uri: u }} style={s.thumb} />)}</View>
       )}
       {m.text ? <Text style={s.text} selectable>{m.text}</Text> : null}
+      {m.deep ? (
+        <Text style={[s.status, !m.deep.agreed && s.warn]}>
+          {m.deep.agreed ? `${m.deep.support} ${S.agreedOf} ${m.deep.total} ${S.agreedTail}` : S.notAgreed}
+        </Text>
+      ) : null}
       {m.sources?.map((src) => (
         <Text key={src.n} style={s.source} onPress={() => Linking.openURL(src.url)} numberOfLines={1}>
           [{src.n}] {src.title || src.url}
@@ -209,6 +230,9 @@ const styles = (t: Theme) => StyleSheet.create({
     borderRadius: 12, borderWidth: 1, borderColor: t.line, backgroundColor: t.bg },
   iconBtn: { height: 40, paddingHorizontal: 10, borderRadius: 10, justifyContent: "center", borderWidth: 1, borderColor: t.line },
   iconText: { color: t.text, fontSize: 13 },
+  iconBtnOn: { backgroundColor: t.accent, borderColor: t.accent },
+  iconTextOn: { color: t.accentText, fontWeight: "600" },
+  warn: { color: t.danger },
   send: { height: 40, paddingHorizontal: 14, borderRadius: 10, justifyContent: "center", backgroundColor: t.accent },
   primary: { paddingHorizontal: 18, paddingVertical: 12, borderRadius: 10, backgroundColor: t.accent },
   primaryText: { color: t.accentText, fontWeight: "600" },

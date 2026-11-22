@@ -29,7 +29,7 @@ export async function loadEngine(
   const ctx = await initLlama(
     {
       model: modelPath,
-      n_ctx: opts.nCtx ?? 8192,
+      n_ctx: opts.nCtx ?? 16384, // cheap here: only 8 of 32 layers keep a KV cache (3:1 DeltaNet hybrid)
       n_gpu_layers: 99,
       use_mlock: false,
       ctx_shift: false, // required for images
@@ -44,7 +44,8 @@ export async function loadEngine(
     vision = await ctx.initMultimodal({ path: mmprojPath, use_gpu: true });
   }
 
-  const complete: CompleteFn = async ({ messages, tools, onText }) => {
+  const complete: CompleteFn = async ({ messages, tools, onText, thinking: thinkOverride }) => {
+    const thinking = thinkOverride ?? opts.thinking;
     const res = await ctx.completion(
       {
         // llama.rn passes messages to llama.cpp's OpenAI-compatible parser, which also reads
@@ -53,11 +54,11 @@ export async function loadEngine(
         tools: tools ? [...tools] : undefined,
         tool_choice: tools ? "auto" : undefined,
         jinja: true,
-        n_predict: opts.maxTokens ?? 2048,
-        temperature: opts.thinking ? 0.6 : 0.7,
-        top_p: opts.thinking ? 0.95 : 0.8,
+        n_predict: thinking ? 6144 : opts.maxTokens ?? 2048, // reasoning needs room
+        temperature: thinking ? 0.6 : 0.7,
+        top_p: thinking ? 0.95 : 0.8,
         top_k: 20,
-        chat_template_kwargs: { enable_thinking: opts.thinking },
+        chat_template_kwargs: { enable_thinking: thinking },
       },
       (data) => {
         if (onText && typeof data.content === "string") onText(data.content);

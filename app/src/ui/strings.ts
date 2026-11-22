@@ -14,6 +14,8 @@ const en = {
   imitateHint: "Answers follow your own writing style, learned from your messages on this phone.",
   thinking: "Think before answering", thinkingHint: "Slower, better on hard problems.",
   clearChat: "Clear conversation", photo: "(photo)",
+  deep: "Deep", attempt: "Solving", agreedOf: "of", agreedTail: "solutions agree",
+  notAgreed: "The solutions disagree; check this answer.",
 };
 
 const tr: typeof en = {
@@ -30,6 +32,8 @@ const tr: typeof en = {
   imitateHint: "Cevaplar, bu telefondaki mesajlarından öğrenilen kendi yazım tarzını izler.",
   thinking: "Cevaplamadan önce düşün", thinkingHint: "Daha yavaş, zor sorularda daha iyi.",
   clearChat: "Sohbeti temizle", photo: "(fotoğraf)",
+  deep: "Derin", attempt: "Çözülüyor", agreedOf: "/", agreedTail: "çözüm aynı sonuca vardı",
+  notAgreed: "Çözümler farklı sonuçlara vardı; bu cevabı kontrol et.",
 };
 
 export type Strings = typeof en;
