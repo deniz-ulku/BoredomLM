@@ -7,9 +7,9 @@ import type { Settings } from "../store/settings";
 import { S } from "./strings";
 import { useTheme, type Theme } from "./theme";
 
-type Props = { settings: Settings; onChange: (s: Settings) => void; onClearChat: () => void };
+type Props = { settings: Settings; onChange: (s: Settings) => void; onClearChat: () => void; active?: boolean };
 
-export function SettingsScreen({ settings, onChange, onClearChat }: Props) {
+export function SettingsScreen({ settings, onChange, onClearChat, active }: Props) {
   const t = useTheme();
   const s = styles(t);
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => onChange({ ...settings, [k]: v });
@@ -18,6 +18,9 @@ export function SettingsScreen({ settings, onChange, onClearChat }: Props) {
   useEffect(() => {
     getHfToken().then((v) => setToken(v ?? "")).catch(() => undefined);
   }, []);
+  useEffect(() => {
+    if (active) setLearned(loadPairs().length); // the screen stays mounted; refresh when shown
+  }, [active]);
 
   return (
     <ScrollView style={s.fill} contentContainerStyle={s.page}>

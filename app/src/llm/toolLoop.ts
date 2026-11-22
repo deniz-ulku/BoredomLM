@@ -40,6 +40,8 @@ export type LoopOptions = {
   onEvent?: (e: LoopEvent) => void;
   maxToolChars?: number;
   thinking?: boolean;
+  /** Checked between rounds: true ends the loop with what was generated so far. */
+  shouldStop?: () => boolean;
 };
 
 /** Returns the final answer text and the full message list including tool turns. */
@@ -57,7 +59,7 @@ export async function runChat(opts: LoopOptions): Promise<{ answer: string; mess
       onText: (text) => onEvent?.({ kind: "text", text }),
       thinking: opts.thinking,
     });
-    const calls = useTools ? (res.tool_calls ?? []).filter((c) => c?.function?.name) : [];
+    const calls = useTools && !opts.shouldStop?.() ? (res.tool_calls ?? []).filter((c) => c?.function?.name) : [];
     if (calls.length === 0) {
       const answer = (res.content || res.text || "").trim();
       messages.push({ role: "assistant", content: answer });

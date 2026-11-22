@@ -14,6 +14,8 @@ export type UiMessage = {
   versions?: string[];
   /** The user corrected this answer. */
   edited?: boolean;
+  /** Generation failed; the text is an error message and is never learned from. */
+  failed?: boolean;
   createdAt: number;
 };
 

@@ -52,7 +52,25 @@ export function spaceNeeded(spec: ModelSpec): number {
 
 export const freeSpace = (): number => Paths.availableDiskSpace;
 
-export async function download(
+const inflight = new Map<string, Promise<void>>();
+
+export const isDownloading = (spec: ModelSpec): boolean => inflight.has(spec.id);
+
+/** Download a model's files; a second call for the same model joins the first instead of racing it. */
+export function download(
+  spec: ModelSpec,
+  onProgress: (fraction: number) => void,
+  signal?: AbortSignal,
+  hfToken?: string | null,
+): Promise<void> {
+  const running = inflight.get(spec.id);
+  if (running) return running;
+  const p = downloadFiles(spec, onProgress, signal, hfToken).finally(() => inflight.delete(spec.id));
+  inflight.set(spec.id, p);
+  return p;
+}
+
+async function downloadFiles(
   spec: ModelSpec,
   onProgress: (fraction: number) => void,
   signal?: AbortSignal,

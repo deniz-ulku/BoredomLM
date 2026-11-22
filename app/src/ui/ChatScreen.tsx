@@ -36,6 +36,7 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
   const [live, setLive] = useState("");
   const [status, setStatus] = useState("");
   const [deep, setDeep] = useState(false);
+  const stopped = useRef(false);
   const list = useRef<FlatList<UiMessage>>(null);
 
   useEffect(() => saveConversation(messages), [messages]);
@@ -64,6 +65,8 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
     setBusy(true);
     setLive("");
     setStatus("");
+    stopped.current = false;
+    const shouldStop = () => stopped.current;
 
     const style = settings.imitateMe
       ? buildStyleProfile(history.filter((m) => m.role === "user").map((m) => m.text))
@@ -93,23 +96,26 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
     const toolRunner = (name: string, args: string) => runTool(name, args, ctx);
 
     let answer = "";
+    let failed = false;
     let deepMeta: UiMessage["deep"];
     try {
       if (deep) {
         const res = await deepThink({ complete: engine.complete, messages: chat, attempts: 3, tools,
-          runTool: toolRunner, onEvent });
+          runTool: toolRunner, onEvent, shouldStop });
         answer = res.answer;
         deepMeta = { support: res.support, total: res.total, agreed: res.agreed };
       } else {
-        answer = (await runChat({ complete: engine.complete, messages: chat, tools, runTool: toolRunner, onEvent }))
-          .answer;
+        answer = (await runChat({ complete: engine.complete, messages: chat, tools, runTool: toolRunner, onEvent,
+          shouldStop, thinking: settings.thinking })).answer;
       }
     } catch (e) {
       answer = `${S.failed}: ${(e as Error).message}`;
+      failed = true;
     }
     const cited = citedSources(answer, ctx.sources);
+    // A failed answer is never learned from: it keeps no regeneration history and is marked failed.
     setMessages([...history, { id: newId(), role: "assistant", text: answer, images: [], sources: cited,
-      deep: deepMeta, versions, createdAt: Date.now() }]);
+      deep: deepMeta, versions: failed ? undefined : versions, failed, createdAt: Date.now() }]);
     setBusy(false);
     setLive("");
     setStatus("");
@@ -120,7 +126,7 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
     if (!engine || busy || (!text && images.length === 0)) return;
     // Moving on after regenerating means the shown version was kept: learn it over the replaced ones.
     const prev = messages[messages.length - 1];
-    if (settings.learnFromMe && prev?.role === "assistant" && prev.versions?.length) {
+    if (settings.learnFromMe && prev?.role === "assistant" && !prev.failed && prev.versions?.length) {
       savePairs(regenerationPairs(toTurns(messages.slice(0, -1)), prev.versions, prev.text, Date.now(), newId));
     }
     const history = [...messages.map((m) => (m === prev ? { ...m, versions: undefined } : m)),
@@ -145,7 +151,7 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
     const i = messages.findIndex((m) => m.id === editing.id);
     if (i < 0) return setEditing(null);
     const old = messages[i];
-    if (settings.learnFromMe) {
+    if (settings.learnFromMe && !old.failed) {
       savePair(makePair("edit", toTurns(messages.slice(0, i)), editing.text, old.text, Date.now(), newId()));
     }
     setMessages(messages.map((m) => (m.id === editing.id ? { ...m, text: editing.text.trim(), edited: true } : m)));
@@ -211,7 +217,7 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
           multiline
         />
         {busy ? (
-          <Pressable style={s.send} onPress={() => engine.stop()}><Text style={s.primaryText}>{S.stop}</Text></Pressable>
+          <Pressable style={s.send} onPress={() => { stopped.current = true; void engine.stop(); }}><Text style={s.primaryText}>{S.stop}</Text></Pressable>
         ) : (
           <Pressable style={s.send} onPress={send}><Text style={s.primaryText}>{S.send}</Text></Pressable>
         )}

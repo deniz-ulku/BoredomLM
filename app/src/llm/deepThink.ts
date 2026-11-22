@@ -54,6 +54,8 @@ export type DeepOptions = {
   onEvent?: (e: LoopEvent | { kind: "attempt"; index: number; total: number }) => void;
   /** Stop early once this many attempts agree (default: a strict majority of `attempts`). */
   earlyStop?: number;
+  /** User pressed Stop: no further attempts or tool rounds. */
+  shouldStop?: () => boolean;
 };
 
 export async function deepThink(o: DeepOptions): Promise<DeepResult> {
@@ -68,11 +70,11 @@ export async function deepThink(o: DeepOptions): Promise<DeepResult> {
   for (let i = 0; i < n; i++) {
     o.onEvent?.({ kind: "attempt", index: i + 1, total: n });
     const { answer } = await runChat({ complete: o.complete, messages: msgs, tools, runTool: run,
-      onEvent: o.onEvent, maxRounds: 6, thinking: true });
+      onEvent: o.onEvent, maxRounds: 6, thinking: true, shouldStop: o.shouldStop });
     const final = extractFinal(answer);
     attempts.push({ text: answer, answer: final, key: final ? normalizeAnswer(final) : null });
     const v = vote(attempts);
-    if (v.support >= earlyStop) break;
+    if (v.support >= earlyStop || o.shouldStop?.()) break;
   }
   const v = vote(attempts);
   return {

@@ -77,7 +77,7 @@ export function nightlyBatch(pairs: PreferencePair[], maxNew = 64, replay = 0.25
   const fresh = pairs.filter((p) => !p.trainedAt).slice(-maxNew);
   const old = pairs.filter((p) => p.trainedAt);
   const nReplay = Math.min(old.length, Math.ceil(fresh.length * replay));
-  return [...old.slice(-nReplay), ...fresh];
+  return nReplay ? [...old.slice(-nReplay), ...fresh] : fresh; // slice(-0) would return everything
 }
 
 /** Regenerations: when the user moves on, the version they kept beats the ones they replaced. */

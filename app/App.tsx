@@ -30,7 +30,8 @@ export default function App() {
     saveSettings(s);
   }, []);
 
-  // (Re)load the model when the active model or the thinking setting changes.
+  // (Re)load the model when the active model changes. Thinking is passed per call, so toggling it
+  // never releases an engine that may be mid-answer.
   useEffect(() => {
     const spec = CATALOG.find((m) => m.id === settings.activeModelId);
     if (!spec || !isInstalled(spec)) return;
@@ -43,20 +44,21 @@ export default function App() {
       setEngine(null);
       try {
         const e = await loadEngine(modelFile(spec, "model")!.uri, modelFile(spec, "mmproj")?.uri ?? null,
-          { thinking: settings.thinking }, (p) => setLoading(p));
+          { thinking: false }, (p) => !cancelled && setLoading(p));
         if (cancelled) return void (await e.release());
         engineRef.current = e;
         setEngine(e);
       } catch (e) {
-        setError((e as Error).message);
+        if (!cancelled) setError((e as Error).message);
       } finally {
-        setLoading(null);
+        if (!cancelled) setLoading(null); // a superseded load must not clear the newer one's indicator
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [settings.activeModelId, settings.thinking]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.activeModelId]);
 
   const use = (spec: ModelSpec) => {
     updateSettings({ ...settings, activeModelId: spec.id });
@@ -73,12 +75,16 @@ export default function App() {
         </View>
         {error ? <Text style={[styles.error, { color: t.danger }]}>{error}</Text> : null}
         <View style={styles.fill}>
-          {tab === "chat" && (
+          {/* All screens stay mounted so an answer or a download in progress survives a tab switch. */}
+          <View style={tab === "chat" ? styles.fill : styles.hidden}>
             <ChatScreen key={chatKey} engine={engine} settings={settings} onOpenModels={() => setTab("models")} />
-          )}
-          {tab === "models" && <ModelsScreen activeId={settings.activeModelId} loading={loading} onUse={use} />}
-          {tab === "settings" && (
+          </View>
+          <View style={tab === "models" ? styles.fill : styles.hidden}>
+            <ModelsScreen activeId={settings.activeModelId} loading={loading} onUse={use} />
+          </View>
+          <View style={tab === "settings" ? styles.fill : styles.hidden}>
             <SettingsScreen
+              active={tab === "settings"}
               settings={settings}
               onChange={updateSettings}
               onClearChat={() => {
@@ -87,7 +93,7 @@ export default function App() {
                 setTab("chat");
               }}
             />
-          )}
+          </View>
         </View>
         <View style={[styles.tabs, { borderTopColor: t.line, backgroundColor: t.surface }]}>
           {(["chat", "models", "settings"] as const).map((k) => (
@@ -106,6 +112,7 @@ export default function App() {
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
+  hidden: { display: "none" },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16,
     paddingVertical: 10, borderBottomWidth: 1 },
   brand: { fontSize: 18, fontWeight: "700", letterSpacing: 0.3 },

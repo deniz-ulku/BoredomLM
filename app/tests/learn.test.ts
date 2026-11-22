@@ -63,3 +63,10 @@ describe("learning pairs", () => {
     expect(pairs.every((p) => p.chosen === "second try is better" && p.source === "regenerate")).toBe(true);
   });
 });
+
+describe("review fixes", () => {
+  it("returns an empty nightly batch when nothing is new", () => {
+    const old = [makePair("edit", prompt, "a b", "c d", 1, "x")!].map((p) => ({ ...p, trainedAt: 5 }));
+    expect(nightlyBatch(old)).toEqual([]);
+  });
+});

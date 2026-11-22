@@ -73,3 +73,20 @@ describe("deepThink", () => {
     expect(tools[0]).toBe("1250*0.18/12 = 18.75");
   });
 });
+
+describe("stop", () => {
+  it("stops deep think after the current attempt and skips tool rounds", async () => {
+    let stop = false;
+    let calls = 0;
+    const complete: CompleteFn = async () => {
+      calls++;
+      stop = true; // user presses Stop during the first attempt
+      return { content: "Answer: 1", text: "", tool_calls: [{ type: "function", function: { name: "calculate",
+        arguments: '{"expression":"1"}' } }] };
+    };
+    const res = await deepThink({ complete, messages: [{ role: "user", content: "q" }], attempts: 3,
+      shouldStop: () => stop });
+    expect(calls).toBe(1);
+    expect(res.total).toBe(1);
+  });
+});
