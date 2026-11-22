@@ -79,3 +79,13 @@ def test_encode_image_resizes_and_compresses():
 
     assert Image.open(io.BytesIO(enc["bytes"])).size == (1536, 384)
     assert encode_image(None) is None
+
+
+def test_exclamations_ignore_code_and_operators():
+    from candid.filters import exclamations
+
+    assert exclamations("Wow! That is great!") == 2
+    assert exclamations("Use `a != b` in Python.") == 0
+    assert exclamations("```js\nif (!ok) alert('hi!')\n```\nDone.") == 0
+    assert exclamations("Set color !important in CSS.") == 0
+    assert exclamations("Stop!!") == 1

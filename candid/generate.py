@@ -149,10 +149,11 @@ def shards(cfg: Config, store) -> None:
         rows = [dict(ex) for ex in ds.select(range(lo, hi))]
         for r in rows:
             r["image"] = _prep_image(r["image"])
-        pairs, stats = _shard_pairs(llm, rows, cfg, full, short, many, edit_p, f"shard {i}")
+        pairs, stats, rejects = _shard_pairs(llm, rows, cfg, full, short, many, edit_p, f"shard {i}")
         store.write_json(shard_name(i), {
             "pairs": [{"idx": lo + j, "chosen": c, "rejected": d, "kind": k} for j, c, d, k in pairs],
             "stats": dict(stats),
+            "rejected_edits": rejects,
         })
         log.info("shard %d/%d: %d pairs", i + 1, n, len(pairs))
         store.update_state(progress=f"generate shard {i + 1}/{n}")
@@ -191,7 +192,7 @@ def _shard_pairs(llm, rows, cfg, full, short, many, edit_p, tag):
         llm, [[{"role": "user", "content": EDIT_PROMPT.format(answer=defaults[j])}] for j in edit_idx], edit_p,
         f"{tag} edit"))))
 
-    pairs = []
+    pairs, rejects = [], []
     for j in spec_idx:
         b, chosen = rows[j]["bucket"], pick_compliant(specs[j])
         if chosen is None:
@@ -203,10 +204,13 @@ def _shard_pairs(llm, rows, cfg, full, short, many, edit_p, tag):
         b, why = rows[j]["bucket"], accept_edit(defaults[j], edits[j], cfg.min_edit_ratio)
         if why:
             stats[f"{b}/edit_{why}"] += 1
+            if len(rejects) < 6:
+                bad = [k for k, hit in violations(edits[j]).items() if hit]
+                rejects.append({"bucket": b, "why": why, "violations": bad, "edited": edits[j][:600]})
             continue
         pairs.append((j, edits[j], defaults[j], "style"))
         stats[f"{b}/kept_style"] += 1
-    return pairs, stats
+    return pairs, stats, rejects
 
 
 # ----- step 3: assemble -------------------------------------------------------
@@ -280,7 +284,8 @@ def assemble(cfg: Config, store) -> dict:
     store.push("pairs_sample.jsonl")
     out = {"pairs": len(items), **dict(sorted(stats.items()))}
     store.write_json("gen_stats.json", out)
-    log.info("assembled: %s", out)
+    log.info("assembled: %d pairs", len(items))
+    data_report(cfg, store)
     return out
 
 
@@ -320,6 +325,10 @@ def data_report(cfg: Config, store, samples_per_bucket: int = 3) -> dict:
         row["soft_refusal_in_chosen"] = soft[b]
         report[b] = row
         print(f"[report] {b} " + " ".join(f"{k}={v}" for k, v in sorted(row.items())), flush=True)
+    for i in range(n):
+        for r in (store.read_json(shard_name(i)) or {}).get("rejected_edits", [])[:2]:
+            print(f"[report] rejected edit {r['bucket']} why={r['why']} violations={r['violations']} "
+                  f"TEXT: {_clip(r['edited'], 300)}", flush=True)
     for b, rows in examples.items():
         for prompt, chosen, rejected in rows:
             print(f"[report] sample {b} PROMPT: {_clip(prompt, 300)}", flush=True)

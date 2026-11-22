@@ -115,8 +115,13 @@ def has_filler(text: str) -> bool:
     return bool(_FILLER_OPEN.search(t) or _FILLER_CLOSE.search(t[-300:]))
 
 
+_CODE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
+
+
 def exclamations(text: str) -> int:
-    return _norm(text).count("!")
+    """Exclamation marks used as punctuation: code, `!=`, `!important` and the like do not count."""
+    prose = _CODE.sub(" ", _norm(text))
+    return len(re.findall(r"!+(?=\s|$|[\"')\]])", prose))
 
 
 def is_hard_limit(prompt: str) -> bool:
