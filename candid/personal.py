@@ -9,6 +9,10 @@ First run (lr 2e-5, NLL weight 0.2): nothing moved (terse 0 -> 0, formal_tr 0 ->
 held. The pairs were learned (reward accuracy 1.0) but greedy answers did not change, so
 the settings below are stronger.
 
+Second run (lr 1e-4 / 2e-4, NLL 1.0): style and facts moved (terse 0 -> 100, formal_tr
+0 -> 73-80, facts 7 -> 73-100), but the terse user's adapter cut GSM8K from 90 to 80: it
+stopped showing work even when the prompt asked for it. Anchor pairs (below) target that.
+
     CANDID_MODE=personal on the machine (see remote/run.sh), or python -m candid.personal
 """
 
@@ -130,8 +134,16 @@ def user_messages(persona: Persona, prompt: str) -> list[dict]:
     return [{"role": "user", "content": prompt}]
 
 
-# (name, learning rate, NLL weight next to DPO). Phone cost is the same for all of them.
-SETTINGS = [("lr1e-4", 1e-4, 1.0), ("lr2e-4", 2e-4, 1.0)]
+# (name, learning rate, NLL weight next to DPO, anchor pairs). Phone cost is about the same.
+SETTINGS = [("lr1e-4+anchor", 1e-4, 1.0, 15), ("lr2e-4+anchor", 2e-4, 1.0, 15)]
+
+
+def anchor_rejected(worked: str) -> str:
+    """The same answer without its working: only the final answer line. An anchor pair
+    (worked answer > bare answer) differs only in showing work, not in style, so it keeps an
+    explicit "think, then answer" request working whatever style the user teaches."""
+    lines = [ln for ln in strip_think(worked).strip().splitlines() if ln.strip()]
+    return lines[-1].strip() if lines else ""
 
 
 def correction(persona: Persona, answer: str) -> str:
@@ -161,6 +173,19 @@ def _gsm8k(llm, n: int, seed: int) -> float:
     convs, score = task_gsm8k(n, seed)
     hits = score(_answer(llm, convs, max_tokens=1024))
     return round(100 * sum(hits) / max(1, len(hits)), 1)
+
+
+def _anchors(llm, n: int, seed: int) -> list[tuple[list[dict], str]]:
+    """(conversation, worked answer) for GSM8K train problems the base model gets right."""
+    from candid.evaluate import COT, _final, _load, _num
+
+    ds = _load("openai/gsm8k", "main", split="train", n=3 * n, seed=seed)
+    convs = [[{"role": "user", "content": ex["question"] + COT}] for ex in ds]
+    golds = [float(ex["answer"].split("####")[-1].strip().replace(",", "")) for ex in ds]
+    outs = _answer(llm, convs, max_tokens=1024)
+    good = [(c, o) for c, o, g in zip(convs, outs, golds)
+            if _num(_final(o)) == g and len(o.strip().splitlines()) > 1]
+    return good[:n]
 
 
 def _train(base: str, pairs: list[dict], out: str, cfg: Config, lr: float, nll: float) -> float:
@@ -225,13 +250,14 @@ def run(cfg: Config, base: str, work: str, n_gsm8k: int = 200) -> dict:
         chosen = [correction(p, a) for a in _answer(llm, [sys + user_messages(p, q) for q in train_p], temperature=0.3)]
         before = _answer(llm, [user_messages(p, q) for q in test_p])
         plans[p.name] = (train_p, test_p, chosen, rejected, before)
+    anchors = _anchors(llm, max(a for *_, a in SETTINGS), cfg.seed)
     llm = None
     _free_gpu()
 
     from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(base)
-    for name, lr, nll in SETTINGS:
+    for name, lr, nll, n_anchor in SETTINGS:
         for p in PERSONAS:
             train_p, test_p, chosen, rejected, before = plans[p.name]
             pairs = []
@@ -241,6 +267,12 @@ def run(cfg: Config, base: str, work: str, n_gsm8k: int = 200) -> dict:
                 prompt = processor.apply_chat_template(user_messages(p, q), add_generation_prompt=True,
                                                        tokenize=False, enable_thinking=False)
                 pairs.append({"prompt": prompt, "chosen": c + "<|im_end|>\n", "rejected": r + "<|im_end|>\n"})
+            for conv, worked in anchors[:n_anchor]:
+                prompt = processor.apply_chat_template(conv, add_generation_prompt=True, tokenize=False,
+                                                       enable_thinking=False)
+                pairs.append({"prompt": prompt, "chosen": worked + "<|im_end|>\n",
+                              "rejected": anchor_rejected(worked) + "<|im_end|>\n"})
+            random.Random(cfg.seed).shuffle(pairs)
             out = os.path.join(work, f"personal-{p.name}")
             secs = _train(base, pairs, out, cfg, lr, nll)
             llm = _llm(out, cfg)
@@ -251,7 +283,8 @@ def run(cfg: Config, base: str, work: str, n_gsm8k: int = 200) -> dict:
             shutil.rmtree(out, ignore_errors=True)
             shutil.rmtree(out + "-ckpt", ignore_errors=True)
             key = f"{p.name}/{name}"
-            results[key] = {"pairs": len(pairs), "train_seconds": round(secs),
+            results[key] = {"pairs": len(pairs), "anchors": min(n_anchor, len(anchors)),
+                            "train_seconds": round(secs),
                             "match_before": match_rate(p.check, before), "match_after": match_rate(p.check, after),
                             "gsm8k_before": before_gsm, "gsm8k_after": after_gsm,
                             "sample_after": after[0][:160] if after else ""}

@@ -268,6 +268,8 @@ def test_personal_simulation_scoring_and_splits():
     facts = next(p for p in PERSONAS if p.facts)
     assert user_messages(facts, "q") == [{"role": "user", "content": "q"}]  # facts must come from the weights
     assert correction(PERSONAS[0], "Hello There") == "hello there"
+    from candid.personal import anchor_rejected
+    assert anchor_rejected("<think>x</think>3 + 4 = 7\n\n7 * 2 = 14\nAnswer: 14\n") == "Answer: 14"
 
 
 def test_config_parses_by_declared_type(monkeypatch):
