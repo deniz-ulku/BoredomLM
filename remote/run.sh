@@ -12,8 +12,17 @@
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
-# remote/RUN (from GitHub) names the current run, so an existing machine can move on to the next run.
-[[ -f remote/RUN ]] && CANDID_RUN="$(tr -d '[:space:]' < remote/RUN)"
+# remote/RUN (from GitHub) names the current run on its first line, so an existing machine can
+# move on to the next run; further "key=value" lines override config fields for that run.
+if [[ -f remote/RUN ]]; then
+  CANDID_RUN="$(head -n1 remote/RUN | tr -d '[:space:]')"
+  while IFS='=' read -r key value; do
+    key="$(echo "$key" | tr -d '[:space:]')"
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    export "CANDID_${key^^}=$(echo "$value" | tr -d '[:space:]')"
+    echo "[run] override CANDID_${key^^}=$value"
+  done < <(tail -n +2 remote/RUN)
+fi
 export CANDID_RUN="${CANDID_RUN:-v1}"
 export CANDID_WORK_DIR="/workspace/work/runs/$CANDID_RUN"
 export PYTHONUNBUFFERED=1

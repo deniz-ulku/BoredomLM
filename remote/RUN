@@ -1,1 +1,12 @@
-v1
+v1-smoke
+n_general_en=20
+n_general_tr=20
+n_over_refusal=200
+n_image=20
+n_image_pref=8
+shard_size=150
+eval_limit=30
+eval_behaviour_limit=30
+grad_accum=2
+ckpt_minutes=2
+gguf_quants=Q4_K_M

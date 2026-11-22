@@ -81,7 +81,7 @@ def current_run() -> str:
     """The run named in remote/RUN; machines read the same file from GitHub."""
     try:
         with open(os.path.join(ROOT, "remote", "RUN")) as f:
-            return f.read().strip() or "v1"
+            return (f.readline().strip() or "v1")
     except FileNotFoundError:
         return "v1"
 
