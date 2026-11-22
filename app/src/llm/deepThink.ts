@@ -5,6 +5,9 @@
 import { CALC_TOOL, runCalc } from "./calc";
 import { runChat, type ChatMessage, type CompleteFn, type LoopEvent } from "./toolLoop";
 
+/** Each Deep think attempt may reason longer than the everyday thinking mode. */
+export const DEEP_THINK_BUDGET = 2048;
+
 export const DEEP_INSTRUCTION =
   "Solve this carefully. Work it out step by step, use the calculate tool for every non-trivial " +
   "calculation, check your result, and end with a last line of the form: Answer: <final answer>";
@@ -70,7 +73,7 @@ export async function deepThink(o: DeepOptions): Promise<DeepResult> {
   for (let i = 0; i < n; i++) {
     o.onEvent?.({ kind: "attempt", index: i + 1, total: n });
     const { answer } = await runChat({ complete: o.complete, messages: msgs, tools, runTool: run,
-      onEvent: o.onEvent, maxRounds: 6, thinking: true, shouldStop: o.shouldStop });
+      onEvent: o.onEvent, maxRounds: 6, thinking: true, thinkingBudget: DEEP_THINK_BUDGET, shouldStop: o.shouldStop });
     const final = extractFinal(answer);
     attempts.push({ text: answer, answer: final, key: final ? normalizeAnswer(final) : null });
     const v = vote(attempts);

@@ -26,6 +26,8 @@ export type CompleteFn = (args: {
   onThinking?: () => void;
   /** Override the engine's thinking setting for this call. */
   thinking?: boolean;
+  /** Most reasoning tokens before the model is made to answer. */
+  thinkingBudget?: number;
 }) => Promise<CompletionResult>;
 
 export type LoopEvent =
@@ -43,6 +45,7 @@ export type LoopOptions = {
   onEvent?: (e: LoopEvent) => void;
   maxToolChars?: number;
   thinking?: boolean;
+  thinkingBudget?: number;
   /** Checked between rounds: true ends the loop with what was generated so far. */
   shouldStop?: () => boolean;
 };
@@ -62,6 +65,7 @@ export async function runChat(opts: LoopOptions): Promise<{ answer: string; mess
       onText: (text) => onEvent?.({ kind: "text", text }),
       onThinking: () => onEvent?.({ kind: "thinking" }),
       thinking: opts.thinking,
+      thinkingBudget: opts.thinkingBudget,
     });
     const calls = useTools && !opts.shouldStop?.() ? (res.tool_calls ?? []).filter((c) => c?.function?.name) : [];
     if (calls.length === 0) {

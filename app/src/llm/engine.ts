@@ -13,6 +13,9 @@ export type Engine = {
   release: () => Promise<void>;
 };
 
+/** Reasoning tokens for the everyday thinking mode (Deep think sets its own). */
+export const THINKING_BUDGET = 1024;
+
 export type EngineOptions = {
   /** Qwen3.5 thinking mode: slower, better on hard problems. */
   thinking: boolean;
@@ -44,8 +47,9 @@ export async function loadEngine(
     vision = await ctx.initMultimodal({ path: mmprojPath, use_gpu: true });
   }
 
-  const complete: CompleteFn = async ({ messages, tools, onText, onThinking, thinking: thinkOverride }) => {
+  const complete: CompleteFn = async ({ messages, tools, onText, onThinking, thinking: thinkOverride, thinkingBudget }) => {
     const thinking = thinkOverride ?? opts.thinking;
+    const budget = thinkingBudget ?? THINKING_BUDGET;
     const res = await ctx.completion(
       {
         // llama.rn passes messages to llama.cpp's OpenAI-compatible parser, which also reads
@@ -59,7 +63,12 @@ export async function loadEngine(
         // one the template opens with) out of content, so the user never sees the tags.
         enable_thinking: thinking,
         reasoning_format: "auto",
-        n_predict: thinking ? 6144 : opts.maxTokens ?? 2048, // reasoning needs room
+        n_predict: thinking ? budget + 2048 : opts.maxTokens ?? 2048,
+        // Unbounded, Qwen3.5 reasons for thousands of tokens even on easy questions (measured on
+        // llama.rn's llama.cpp: 1500+ tokens for "27 pens at 3 for $2" without an answer). Past the
+        // budget the end tag is forced and the model answers from what it has.
+        thinking_budget_tokens: thinking ? budget : undefined,
+        thinking_budget_message: thinking ? "\n\nI have enough to answer now.\n" : undefined,
         temperature: thinking ? 0.6 : 0.7,
         top_p: thinking ? 0.95 : 0.8,
         top_k: 20,
