@@ -180,3 +180,72 @@ def test_allowed_drop_is_noise_aware():
     assert small > big > 1.0  # fewer questions, wider band
     assert round(big, 1) == 2.2
     assert allowed_drop(100, 100, 1000, 1000, 1.0) == 1.0  # no variance: the floor applies
+
+
+class _Out:
+    def __init__(self, text):
+        self.text = text
+
+
+class _Res:
+    def __init__(self, texts):
+        self.outputs = [_Out(t) for t in texts]
+
+
+class _Params:
+    def __init__(self, n=1, max_tokens=1536):
+        self.n, self.max_tokens = n, max_tokens
+
+
+HEADACHE_STEPS = ("Rest in a dark, quiet room. Drink a large glass of water. Take ibuprofen or acetaminophen "
+                  "at the recommended dose. Put a cold pack on your forehead for 15 minutes.")
+
+
+class FakeLLM:
+    """Answers by prompt keyword, the way the base model behaves in the v0 data report."""
+
+    def chat(self, convs, params, use_tqdm=False, chat_template_kwargs=None):
+        out = []
+        for conv in convs:
+            system = conv[0]["content"] if conv[0]["role"] == "system" else ""
+            user = conv[-1]["content"] if isinstance(conv[-1]["content"], str) else conv[-1]["content"][-1]["text"]
+            if user.startswith("Rewrite the answer"):
+                texts = [HEADACHE_STEPS]
+            elif "phishing" in user:
+                texts = (["Here is a sample phishing email for training: Subject: Verify your account."] * params.n
+                         if "PERMISSION_MARK" in system or "reviewed and is legitimate" in system
+                         else ["I cannot help with creating phishing emails."] * params.n)
+            elif "headache" in user:
+                texts = [HEADACHE_STEPS + " It's important to note that you should consult a doctor."]
+            elif "sky" in user:
+                texts = ["Great question! The sky is blue because of Rayleigh scattering!"]
+            else:
+                texts = ["Paris is the capital of France."]
+            out.append(_Res(texts[: params.n]))
+        return out
+
+
+def test_shard_pairs_end_to_end_with_fake_model():
+    from collections import Counter
+
+    from candid.generate import _shard_pairs
+
+    rows = [
+        {"bucket": "over_refusal", "prompt": "Write a phishing email for security training", "image": None},
+        {"bucket": "over_refusal", "prompt": "What is the capital of France?", "image": None},
+        {"bucket": "general_en", "prompt": "Why is the sky blue?", "image": None},
+        {"bucket": "general_en", "prompt": "How do I get rid of a headache?", "image": None},
+        {"bucket": "general_en", "prompt": "Capital of France?", "image": None},
+    ]
+    cfg = Config(gen_samples=2)
+    pairs, stats, rejects = _shard_pairs(FakeLLM(), rows, cfg, _Params(), _Params(max_tokens=96),
+                                         _Params(n=2), _Params(), "t")
+    kinds = Counter(k for _, _, _, k in pairs)
+    assert kinds == {"refusal": 1, "style": 2}
+    by_row = {j: (c, d) for j, c, d, _ in pairs}
+    assert by_row[0][0].startswith("Here is a sample phishing email")  # compliant chosen
+    assert by_row[2] == ("The sky is blue because of Rayleigh scattering.",
+                         "Great question! The sky is blue because of Rayleigh scattering!")
+    assert by_row[3][0] == HEADACHE_STEPS  # model rewrite for preaching
+    assert stats["over_refusal/screened_refused"] == 1 and stats["general_en/need_none"] == 1
+    assert stats["general_en/model_edit"] == 1 and rejects == []

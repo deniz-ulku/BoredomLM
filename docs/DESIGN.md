@@ -58,8 +58,8 @@ Instead, preference training (DPO + a small NLL term) on pairs whose both sides 
 
 ### v1 recipe
 
-- **Style pairs:** chosen = the model's own default answer rewritten under `EDIT_PROMPT` (same content; emojis, filler, preaching and AI disclaimers removed). A rewrite that loses more than 40% of the text or still breaks a rule is discarded. No judge.
-- **Refusal pairs:** 15,000 OR-Bench-80k prompts are screened with a 96-token answer; only the refused ones get a full default (rejected) and compliant candidates written with `SPEC + PERMISSION` (chosen).
+- **Style pairs:** chosen = the model's own default answer with only the packaging removed. Emojis, exclamation marks, filler openers/closers and AI disclaimers are removed mechanically (`strip_style`), which cannot lose content. Only answers that preach are rewritten by the model under `EDIT_PROMPT`, then cleaned the same way; such a rewrite is discarded if it loses more than 40% of the text or still breaks a rule. No judge. (The smoke runs showed the 4B model copies its own answer almost verbatim when asked to rewrite it, emojis included, so the model alone was not enough.)
+- **Refusal pairs:** 15,000 OR-Bench-80k prompts are screened with a 96-token answer; only the refused ones get a full default (rejected) and compliant candidates written with `SPEC + PERMISSION` (chosen). In the smoke run 25 of 300 were refused and a compliant answer was found for all 18 that still refused at full length.
 - **Spec:** "keep all the substance; cut only filler" instead of "as short as possible".
 - **Gate:** 1,000 questions per capability benchmark; a benchmark fails when its drop exceeds both 1 point and the one-sided 95% noise band of the difference (about 2.2 points at 90% accuracy). Over-refusal must go down (500 prompts).
 

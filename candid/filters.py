@@ -159,3 +159,52 @@ def detect_lang(text: str) -> str:
 def strip_think(text: str) -> str:
     """Remove a reasoning block if the model emitted one."""
     return re.sub(r"<think>.*?</think>\s*", "", text or "", flags=re.DOTALL).strip()
+
+
+# ----- deterministic style cleanup -----------------------------------------------
+# Used to build "chosen" answers: removing these never removes content, so a pair made this
+# way teaches only style.
+
+_AI_DISCLAIMER = _rx(
+    r"\b(?:I am|I'm) (?:just )?an AI\b",
+    r"\b(?:I am|I'm) not a (?:doctor|lawyer|medical professional|financial advisor|therapist)\b",
+    r"^\W*disclaimer\b",
+    r"\bbir yapay zek[aâ] (?:olarak|modeliyim|asistanıyım)\b",
+)
+_FENCE = re.compile(r"^\s*```")
+_SENTENCE = re.compile(r"[^.!?\n]*[.!?]+[\"')\]]*\s*|[^.!?\n]+$")
+
+
+def _sentences(line: str) -> list[str]:
+    return [s for s in _SENTENCE.findall(line) if s.strip()]
+
+
+def strip_style(text: str) -> str:
+    """Remove emojis, exclamation marks, filler openers/closers and AI disclaimers; keep code as is."""
+    lines, in_code, out = _norm(text).split("\n"), False, []
+    for line in lines:
+        if _FENCE.match(line):
+            in_code = not in_code
+            out.append(line)
+            continue
+        if in_code:
+            out.append(line)
+            continue
+        line = _EMOJI.sub("", line)
+        line = re.sub(r"\?!+", "?", line)
+        line = re.sub(r"!+(?=\s|$|[\"')\]])", ".", line)
+        if _AI_DISCLAIMER.search(line) and len(line) < 400:
+            continue
+        line = re.sub(r"(#+|[-*]|\d+\.)\s{2,}", r"\1 ", line)       # "###  **Top" after an emoji went away
+        line = re.sub(r"(\S) {2,}(\S)", r"\1 \2", line)
+        out.append(line.rstrip())
+
+    prose = [i for i, line in enumerate(out) if line.strip() and not _FENCE.match(line)]
+    if prose and _FILLER_OPEN.search(out[prose[0]]):
+        first = _sentences(out[prose[0]])
+        out[prose[0]] = "".join(first[1:]).strip()
+    for i in prose[-3:]:
+        kept = [s for s in _sentences(out[i]) if not _FILLER_CLOSE.search(s)]
+        out[i] = "".join(kept).rstrip()
+    text = "\n".join(out)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()

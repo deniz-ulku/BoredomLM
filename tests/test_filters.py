@@ -89,3 +89,27 @@ def test_exclamations_ignore_code_and_operators():
     assert exclamations("```js\nif (!ok) alert('hi!')\n```\nDone.") == 0
     assert exclamations("Set color !important in CSS.") == 0
     assert exclamations("Stop!!") == 1
+
+
+def test_strip_style_removes_only_packaging():
+    from candid.filters import is_clean, strip_style
+
+    src = ("Great question! The sky is blue because of Rayleigh scattering!\n\n"
+           "### 🌈 **Why**\n- Shorter wavelengths scatter more 🔵\n\n"
+           "```python\nprint('hi!')  # keep !\nif a != b: pass\n```\n\n"
+           "*Disclaimer: I am an AI, not a physicist.*\n\nI hope this helps! Let me know if you have questions.")
+    out = strip_style(src)
+    assert out.startswith("The sky is blue because of Rayleigh scattering.")
+    assert "### **Why**" in out and "- Shorter wavelengths scatter more" in out
+    assert "print('hi!')  # keep !" in out and "a != b" in out  # code untouched
+    assert "Disclaimer" not in out and "hope this helps" not in out and "Let me know" not in out
+    assert is_clean(out)
+
+
+def test_strip_style_turkish_and_noop():
+    from candid.filters import strip_style
+
+    assert strip_style("Harika bir soru! Ankara Türkiye'nin başkentidir. Umarım yardımcı olur!") == \
+        "Ankara Türkiye'nin başkentidir."
+    plain = "Water boils at 100 C at sea level.\n\n- Lower at altitude."
+    assert strip_style(plain) == plain

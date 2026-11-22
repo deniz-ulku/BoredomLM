@@ -30,7 +30,7 @@ import re
 from collections import Counter
 
 from candid.config import Config
-from candid.filters import is_clean, is_refusal, strip_think, violations
+from candid.filters import is_clean, is_refusal, strip_style, strip_think, violations
 from candid.spec import EDIT_PROMPT, PERMISSION, SPEC
 
 log = logging.getLogger("candid.generate")
@@ -182,15 +182,21 @@ def _shard_pairs(llm, rows, cfg, full, short, many, edit_p, tag):
             stats[f"{rows[j]['bucket']}/default_{k}"] += int(hit)
     spec_idx = [j for j, w in want.items() if w == "spec"]
     edit_idx = [j for j, w in want.items() if w == "edit"]
+    # Emojis, exclamation marks and filler are removed mechanically (content kept by construction);
+    # only preaching needs the model to rewrite sentences.
+    model_edit = [j for j in edit_idx if violations(defaults[j])["preachy"]]
 
     def spec_conv(j):
         system = SPEC + (PERMISSION if rows[j]["bucket"] == SCREENED else "")
         return [{"role": "system", "content": system}, *msg(rows[j])]
 
     specs = dict(zip(spec_idx, _chat(llm, [spec_conv(j) for j in spec_idx], many, f"{tag} spec")))
-    edits = dict(zip(edit_idx, (clean_edit(o[0]) for o in _chat(
-        llm, [[{"role": "user", "content": EDIT_PROMPT.format(answer=defaults[j])}] for j in edit_idx], edit_p,
+    rewritten = dict(zip(model_edit, (clean_edit(o[0]) for o in _chat(
+        llm, [[{"role": "user", "content": EDIT_PROMPT.format(answer=defaults[j])}] for j in model_edit], edit_p,
         f"{tag} edit"))))
+    edits = {j: strip_style(rewritten.get(j, defaults[j])) for j in edit_idx}
+    for j in model_edit:
+        stats[f"{rows[j]['bucket']}/model_edit"] += 1
 
     pairs, rejects = [], []
     for j in spec_idx:
@@ -201,7 +207,9 @@ def _shard_pairs(llm, rows, cfg, full, short, many, edit_p, tag):
         pairs.append((j, chosen, defaults[j], "refusal"))
         stats[f"{b}/kept_refusal"] += 1
     for j in edit_idx:
-        b, why = rows[j]["bucket"], accept_edit(defaults[j], edits[j], cfg.min_edit_ratio)
+        # Only a model rewrite can lose content; the mechanical cleanup cannot.
+        ratio = cfg.min_edit_ratio if j in rewritten else 0.0
+        b, why = rows[j]["bucket"], accept_edit(defaults[j], edits[j], ratio)
         if why:
             stats[f"{b}/edit_{why}"] += 1
             if len(rejects) < 6:
