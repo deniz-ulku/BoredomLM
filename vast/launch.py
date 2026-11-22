@@ -241,6 +241,16 @@ def decide(credit: float, instances: list[dict], logs: dict, now: float, run: st
             return [("launch", None, f"credit ${credit:.2f}")], "launching a new machine"
         return [], f"waiting for credit (have ${credit:.2f}, need > ${min_credit:.2f})"
 
+    if any(parse_label(i.get("label"), base)["kind"] == "done" for i in mine):
+        # The run is finished. Other machines of this run are leftovers: never start or rescue them.
+        done = [i["id"] for i in mine if parse_label(i.get("label"), base)["kind"] == "done"]
+        stray = [i for i in mine if i["id"] not in done]
+        for i in stray:
+            if (i.get("actual_status") or "").lower() == "running":
+                actions.append(("stop", i["id"], "run already finished"))
+        return actions, f"finished on {done[0]}; model is on its disk" + (
+            f" ({len(stray)} leftover machine(s) left untouched)" if stray else "")
+
     summaries = []
     for i in mine:
         iid, label = i["id"], i.get("label")

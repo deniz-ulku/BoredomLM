@@ -223,3 +223,13 @@ def test_rescue_source_gone():
     rescuer = inst(8, label="candid-v0~from:7")
     acts, _ = d(1.0, [rescuer], {8: ""})
     assert [a[0] for a in acts] == ["destroy", "launch"]
+
+
+def test_finished_run_never_restarts_leftovers():
+    done = inst(8, status="exited", label="candid-v0-done")
+    leftover = inst(7, status="exited", intended="running", label=f"candid-v0~start:{int(NOW) - 90 * 60}")
+    acts, summary = d(5.0, [done, leftover], {7: LOG_TRAINING, 8: LOG_TRAINING})
+    assert acts == [] and "finished on 8" in summary
+    running_leftover = inst(7, status="running", label="candid-v0")
+    acts, _ = d(5.0, [done, running_leftover], {})
+    assert acts == [("stop", 7, "run already finished")]
