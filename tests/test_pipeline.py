@@ -98,3 +98,28 @@ def test_parquet_rows_reads_images_one_group_at_a_time(tmp_path):
     assert len(out) == 4 and len({r["prompt"] for r in out}) == 4
     img = Image.open(io.BytesIO(out[0]["image"]["bytes"]))
     assert img.format == "JPEG" and img.size == (1536, 768)
+
+
+def test_train_helpers_cap_images_and_drop_long_pairs():
+    from datasets import Dataset
+
+    from candid.train import cap_image_size, drop_too_long
+
+    class IP:
+        def __init__(self):
+            self.size = {"shortest_edge": 3136, "longest_edge": 99_999_999}
+
+    class Proc:
+        image_processor = IP()
+
+        def __call__(self, text, images=None):
+            n = len(text[0].split()) + (1000 if images else 0)
+            return {"input_ids": [[0] * n]}
+
+    proc = Proc()
+    cap_image_size(proc, 1024 * 1024)
+    assert proc.image_processor.size == {"shortest_edge": 3136, "longest_edge": 1024 * 1024}
+    ds = Dataset.from_dict({"images": [[], ["img"], []], "prompt": ["a b", "c", "x " * 60],
+                            "chosen": ["d", "e", "f"], "rejected": ["g", "h", "i"]})
+    kept = drop_too_long(ds, proc, max_length=50)
+    assert kept["prompt"] == ["a b"]

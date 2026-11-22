@@ -47,6 +47,9 @@ class Config:
     epochs: float = 1.0
     grad_accum: int = 16
     max_length: int = 2048
+    # Image size during training only (vision tower is frozen; this bounds image tokens so
+    # prompt + answer fit in max_length). 1024*1024 px is ~1000 tokens for Qwen3.5.
+    train_max_pixels: int = 1024 * 1024
     ckpt_minutes: float = 15      # save + upload a training checkpoint this often
 
     # Evaluation gate: tuned model may lose at most this many points on any capability benchmark.

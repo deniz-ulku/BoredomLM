@@ -34,6 +34,28 @@ def latest_checkpoint(ckpt_dir: str) -> str | None:
     return max(paths, key=lambda p: int(p.rsplit("-", 1)[-1]), default=None)
 
 
+def cap_image_size(processor, max_pixels: int) -> None:
+    ip = getattr(processor, "image_processor", None)
+    if ip is not None:
+        ip.size = {**dict(ip.size), "longest_edge": max_pixels}
+
+
+def drop_too_long(ds, processor, max_length: int):
+    """Drop pairs that would not fit: truncation would cut image tokens and TRL raises."""
+    def fits(ex):
+        images = ex["images"] or None
+        for side in ("chosen", "rejected"):
+            ids = processor(text=[ex["prompt"] + ex[side]], images=images)["input_ids"][0]
+            if len(ids) > max_length:
+                return False
+        return True
+
+    before = len(ds)
+    ds = ds.filter(fits)
+    log.info("dropped %d of %d pairs longer than %d tokens", before - len(ds), before, max_length)
+    return ds
+
+
 def _callbacks(cfg: Config, store):
     from transformers import TrainerCallback
 
@@ -72,6 +94,8 @@ def run(cfg: Config, store) -> dict:
     log.info("resume from: %s", resume)
 
     processor = AutoProcessor.from_pretrained(cfg.base_model)
+    cap_image_size(processor, cfg.train_max_pixels)
+    ds = drop_too_long(ds, processor, cfg.max_length)
     model = AutoModelForImageTextToText.from_pretrained(cfg.base_model, dtype=torch.bfloat16,
                                                         attn_implementation="sdpa")
     model.config.use_cache = False
@@ -110,7 +134,7 @@ def run(cfg: Config, store) -> dict:
     result = trainer.train(resume_from_checkpoint=resume)
 
     trainer.model.save_pretrained(store.local("adapter"))
-    processor.save_pretrained(store.local("adapter"))
+    AutoProcessor.from_pretrained(cfg.base_model).save_pretrained(store.local("adapter"))  # original image size
     store.push("adapter", replace=True)
 
     logs = [h for h in trainer.state.log_history if "loss" in h]
