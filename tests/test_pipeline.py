@@ -123,3 +123,28 @@ def test_train_helpers_cap_images_and_drop_long_pairs():
                             "chosen": ["d", "e", "f"], "rejected": ["g", "h", "i"]})
     kept = drop_too_long(ds, proc, max_length=50)
     assert kept["prompt"] == ["a b"]
+
+
+def test_data_report_counts_buckets_and_soft_refusals(tmp_path, capsys):
+    from datasets import Dataset, Features, Image, Value
+
+    from candid.generate import data_report, shard_name
+    from candid.store import Store
+
+    cfg = Config(work_dir=str(tmp_path / "runs" / "r"), run="r", shard_size=2)
+    store = Store(None, "r", cfg.work_dir)
+    feats = Features({"id": Value("string"), "bucket": Value("string"), "lang": Value("string"),
+                      "prompt": Value("string"), "image": Image()})
+    Dataset.from_dict({"id": ["a", "b", "c"], "bucket": ["over_refusal", "over_refusal", "general_en"],
+                       "lang": ["en"] * 3, "prompt": ["p0", "p1", "p2"], "image": [None] * 3},
+                      features=feats).save_to_disk(store.local("prompts"))
+    store.write_json(shard_name(0), {"pairs": [{"idx": 0, "chosen": "Sure, here it is.", "rejected": "No."},
+                                              {"idx": 1, "chosen": "I can't share that, but", "rejected": "x"}],
+                                    "stats": {"over_refusal/total": 2, "over_refusal/kept": 2}})
+    store.write_json(shard_name(1), {"pairs": [], "stats": {"general_en/total": 1, "general_en/no_clean_spec": 1}})
+    rep = data_report(cfg, store)
+    assert rep["over_refusal"] == {"total": 2, "kept": 2, "soft_refusal_in_chosen": 1}
+    assert rep["general_en"]["no_clean_spec"] == 1
+    out = capsys.readouterr().out
+    assert "[report] over_refusal kept=2 soft_refusal_in_chosen=1 total=2" in out
+    assert all(len(line) < 500 for line in out.splitlines())

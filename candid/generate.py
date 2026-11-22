@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 from collections import Counter
 
 from candid.config import Config
@@ -246,3 +247,47 @@ def assemble(cfg: Config, store) -> dict:
     store.write_json("gen_stats.json", out)
     log.info("assembled: %s", out)
     return out
+
+
+# ----- diagnostics ------------------------------------------------------------
+
+_SOFT_REFUSAL = re.compile(r"\b(?:I cannot|I can't|I can not|I won't|I'm unable|I am unable|I must decline)\b",
+                           re.IGNORECASE)
+
+
+def _clip(s: str, n: int) -> str:
+    s = " ".join((s or "").split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def data_report(cfg: Config, store, samples_per_bucket: int = 3) -> dict:
+    """Per-bucket pair counts and a few sample pairs, as short log lines (the log is all we can read)."""
+    from datasets import Image, load_from_disk
+
+    ds = load_from_disk(store.local("prompts")).cast_column("image", Image(decode=False))
+    buckets, prompts = ds["bucket"], ds["prompt"]
+    n = (len(ds) + cfg.shard_size - 1) // cfg.shard_size
+    stats, examples = Counter(), {}
+    soft = Counter()
+    for i in range(n):
+        shard = store.read_json(shard_name(i)) or {"pairs": [], "stats": {}}
+        stats.update(shard["stats"])
+        for p in shard["pairs"]:
+            b = buckets[p["idx"]]
+            if _SOFT_REFUSAL.search(p["chosen"]):
+                soft[b] += 1
+            examples.setdefault(b, [])
+            if len(examples[b]) < samples_per_bucket:
+                examples[b].append((prompts[p["idx"]], p["chosen"], p["rejected"]))
+    report = {}
+    for b in sorted({k.split("/")[0] for k in stats}):
+        row = {k.split("/", 1)[1]: v for k, v in stats.items() if k.startswith(b + "/")}
+        row["soft_refusal_in_chosen"] = soft[b]
+        report[b] = row
+        print(f"[report] {b} " + " ".join(f"{k}={v}" for k, v in sorted(row.items())), flush=True)
+    for b, rows in examples.items():
+        for prompt, chosen, rejected in rows:
+            print(f"[report] sample {b} PROMPT: {_clip(prompt, 300)}", flush=True)
+            print(f"[report] sample {b} CHOSEN: {_clip(chosen, 400)}", flush=True)
+            print(f"[report] sample {b} REJECTED: {_clip(rejected, 400)}", flush=True)
+    return report

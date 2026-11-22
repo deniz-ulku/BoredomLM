@@ -71,14 +71,26 @@ def _stage_fns():
     }
 
 
+_DEFAULT = object()
+
+
 def run(cfg: Config, store, fns=None) -> dict:
-    fns = fns or _stage_fns()
+    if fns is None:
+        fns = _DEFAULT
+    real_fns = _stage_fns() if fns is _DEFAULT else fns
     store.ensure_repo()
     state = store.state()
     stale = [st for st, out in STAGE_OUTPUTS.items() if st in state["done"] and not store.exists(out)]
     if stale:
         log.info("redoing stages with missing outputs: %s", stale)
         state = store.update_state(done=[st for st in state["done"] if st not in stale], finished=False)
+    if "assemble" in state["done"] and fns is _DEFAULT:
+        try:  # cheap, and the machine's log is the only window into its data
+            from candid.generate import data_report
+
+            data_report(cfg, store)
+        except Exception as e:  # noqa: BLE001
+            log.warning("data report failed: %s", e)
     if state.get("finished"):
         log.info("run %s already finished", cfg.run)
         return state
@@ -91,7 +103,7 @@ def run(cfg: Config, store, fns=None) -> dict:
         store.update_state(stage=stage, stage_started=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         log.info("== %s ==", stage)
         try:
-            fns[stage](cfg, store)
+            real_fns[stage](cfg, store)
         except Exception:
             err = traceback.format_exc()
             log.error("stage %s failed:\n%s", stage, err)
