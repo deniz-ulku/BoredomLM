@@ -1,6 +1,7 @@
 import * as ImagePicker from "expo-image-picker";
 import { File } from "expo-file-system";
 import { useCallback, useEffect, useRef, useState } from "react";
+import Markdown from "react-native-markdown-display";
 import {
   ActivityIndicator, FlatList, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, StyleSheet, Text,
   TextInput, View,
@@ -184,7 +185,7 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
         ListFooterComponent={busy ? (
           <View style={s.assistant}>
             {status ? <Text style={s.status}>{status}</Text> : null}
-            {live ? <Text style={s.text}>{live}</Text> : <ActivityIndicator color={t.muted} />}
+            {live ? <Answer text={live} t={t} /> : <ActivityIndicator color={t.muted} />}
           </View>
         ) : undefined}
       />
@@ -238,6 +239,33 @@ export function ChatScreen({ engine, settings, onOpenModels }: Props) {
   );
 }
 
+/** Model answers are Markdown (bold, lists, headings, code); render them instead of showing raw marks. */
+function Answer({ text, t }: { text: string; t: Theme }) {
+  return (
+    <Markdown
+      style={{
+        body: { color: t.text, fontSize: 16, lineHeight: 23 },
+        heading1: { fontSize: 20, fontWeight: "700", marginTop: 6 },
+        heading2: { fontSize: 18, fontWeight: "700", marginTop: 6 },
+        heading3: { fontSize: 16, fontWeight: "700", marginTop: 4 },
+        code_inline: { backgroundColor: t.line, color: t.text, borderRadius: 4, paddingHorizontal: 4 },
+        fence: { backgroundColor: t.surface, color: t.text, borderColor: t.line, borderRadius: 8, padding: 10 },
+        code_block: { backgroundColor: t.surface, color: t.text, borderColor: t.line, borderRadius: 8, padding: 10 },
+        link: { color: t.accent },
+        blockquote: { backgroundColor: t.surface, borderLeftColor: t.line, borderLeftWidth: 3, paddingHorizontal: 8 },
+        hr: { backgroundColor: t.line },
+        table: { borderColor: t.line },
+      }}
+      onLinkPress={(url) => {
+        void Linking.openURL(url);
+        return false;
+      }}
+    >
+      {text}
+    </Markdown>
+  );
+}
+
 function toTurns(messages: UiMessage[]): PromptTurn[] {
   return messages.map((m) => ({ role: m.role, content: m.text || S.photo }));
 }
@@ -251,7 +279,8 @@ function Bubble({ m, t, onEdit, onRegenerate }: BubbleProps) {
       {m.images.length > 0 && (
         <View style={s.pending}>{m.images.map((u) => <Image key={u} source={{ uri: u }} style={s.thumb} />)}</View>
       )}
-      {m.text ? <Text style={s.text} selectable>{m.text}</Text> : null}
+      {m.text && m.role === "assistant" ? <Answer text={m.text} t={t} /> : null}
+      {m.text && m.role === "user" ? <Text style={s.text} selectable>{m.text}</Text> : null}
       {m.deep ? (
         <Text style={[s.status, !m.deep.agreed && s.warn]}>
           {m.deep.agreed ? `${m.deep.support} ${S.agreedOf} ${m.deep.total} ${S.agreedTail}` : S.notAgreed}
