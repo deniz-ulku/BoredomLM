@@ -24,6 +24,8 @@ from candid.config import Config
 log = logging.getLogger("candid.pipeline")
 
 STAGES = ["prompts", "generate", "assemble", "eval_base", "train", "eval_tuned", "gate", "export"]
+# A stage marked done whose output has gone missing (or was skipped by older code) runs again.
+STAGE_OUTPUTS = {"prompts": "prompts", "assemble": "pairs", "train": "adapter", "export": "gguf"}
 
 
 def _stage_fns():
@@ -46,9 +48,10 @@ def _stage_fns():
         print(text, flush=True)
 
     def export(cfg, store):
+        # Exported either way (it is cheap) so a model can be tried on a phone; report.md says
+        # whether it passed the gate.
         if store.state().get("gate") != "PASS":
-            log.info("gate did not pass; skipping export")
-            return
+            log.info("gate did not pass; exporting anyway for inspection, not for release")
         train.merge(cfg, store)
         env = {**os.environ, "CANDID_WORK_DIR": os.path.abspath(store.work_dir),
                "CANDID_GGUF_QUANTS": ",".join(cfg.gguf_quants)}
@@ -72,6 +75,10 @@ def run(cfg: Config, store, fns=None) -> dict:
     fns = fns or _stage_fns()
     store.ensure_repo()
     state = store.state()
+    stale = [st for st, out in STAGE_OUTPUTS.items() if st in state["done"] and not store.exists(out)]
+    if stale:
+        log.info("redoing stages with missing outputs: %s", stale)
+        state = store.update_state(done=[st for st in state["done"] if st not in stale], finished=False)
     if state.get("finished"):
         log.info("run %s already finished", cfg.run)
         return state

@@ -4,7 +4,7 @@ import os
 import pytest
 
 from candid.config import Config
-from candid.pipeline import STAGES, run
+from candid.pipeline import STAGE_OUTPUTS, STAGES, run
 from candid.store import Store
 
 _spec = importlib.util.spec_from_file_location("launch", os.path.join(os.path.dirname(__file__), "..", "vast",
@@ -39,6 +39,8 @@ def test_pipeline_resumes_after_crash(tmp_path):
             if crash and not crashed:
                 crashed.append(name)
                 raise RuntimeError("machine lost")
+            if name in STAGE_OUTPUTS:
+                os.makedirs(store.local(STAGE_OUTPUTS[name]), exist_ok=True)
         return f
 
     fns = {st: fn(st, crash=(st == "train")) for st in STAGES}
@@ -54,8 +56,19 @@ def test_pipeline_resumes_after_crash(tmp_path):
     assert st["finished"] and st["failed"] is None and st["attempt"] == 2
 
     calls.clear()
-    run(cfg, s, fns)  # finished runs do nothing
+    run(cfg, s, fns)  # finished runs do nothing...
     assert calls == []
+
+
+def test_pipeline_redoes_stage_with_missing_output(tmp_path):
+    cfg, s = Config(work_dir=str(tmp_path / "runs" / "t"), run="t"), _store(tmp_path)
+    for out in ("prompts", "pairs", "adapter"):
+        os.makedirs(s.local(out))
+    s.update_state(done=list(STAGES), finished=True)  # but export never produced gguf/
+    calls = []
+    fns = {st: (lambda cfg, store, name=st: calls.append(name)) for st in STAGES}
+    st = run(cfg, s, fns)
+    assert calls == ["export"] and st["finished"]
 
 
 NOW = 1_000_000.0
