@@ -218,7 +218,9 @@ def build_prompts(cfg: Config) -> list[Row]:
     rows += _take(_first_working(GENERAL_TR, s), cfg.n_general_tr, "general_tr", not_hard)
     rows += _take(_first_working(OVER_REFUSAL, s), cfg.n_over_refusal, "over_refusal",
                   lambda r: not_hard(r) and r["prompt"] not in held_out)
-    rows += _take(_first_working(TOXIC, s), cfg.n_hard_limit, "hard_limit", lambda r: is_hard_limit(r["prompt"]))
+    if cfg.n_hard_limit:
+        rows += _take(_first_working(TOXIC, s), cfg.n_hard_limit, "hard_limit",
+                      lambda r: is_hard_limit(r["prompt"]))
     rows += _image_prompts(cfg.n_image, s)
     return rows
 

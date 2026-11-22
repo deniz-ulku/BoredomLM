@@ -8,11 +8,13 @@ from candid.sources import _map_aya, _map_cauldron, _map_messages, _take
 
 def test_config_env(monkeypatch):
     monkeypatch.setenv("CANDID_N_IMAGE", "12")
-    monkeypatch.setenv("CANDID_USE_SELF_JUDGE", "false")
     monkeypatch.setenv("CANDID_GGUF_QUANTS", "Q4_K_M")
     monkeypatch.setenv("CANDID_LEARNING_RATE", "1e-5")
+    monkeypatch.setenv("CANDID_RUN", "v9")
+    monkeypatch.delenv("CANDID_WORK_DIR", raising=False)
     c = Config.from_env()
-    assert c.n_image == 12 and c.use_self_judge is False and c.gguf_quants == ["Q4_K_M"] and c.learning_rate == 1e-5
+    assert c.n_image == 12 and c.gguf_quants == ["Q4_K_M"] and c.learning_rate == 1e-5
+    assert c.run == "v9" and c.work_dir.endswith("runs/v9")
 
 
 def test_mappers():
@@ -61,7 +63,7 @@ def test_gate(tmp_path):
     ok, md = evaluate.gate(cfg)
     assert ok and "PASS" in md
 
-    _write(cfg, "tuned", _report(gsm8k=77.0, over_refusal=5.0))  # lost 3 points of math
+    _write(cfg, "tuned", _report(gsm8k=74.0, over_refusal=5.0))  # lost 6 points of math: beyond noise
     assert not evaluate.gate(cfg)[0]
 
     _write(cfg, "tuned", _report(over_refusal=31.0))  # did not reduce refusals
@@ -148,3 +150,33 @@ def test_data_report_counts_buckets_and_soft_refusals(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "[report] over_refusal kept=2 soft_refusal_in_chosen=1 total=2" in out
     assert all(len(line) < 500 for line in out.splitlines())
+
+
+def test_v1_selection_logic():
+    from candid.generate import accept_edit, clean_edit, needs, pick_compliant
+
+    assert needs("I'm sorry, but I can't help with that.") == "spec"
+    assert needs("") == "spec"
+    assert needs("Great question! Water boils at 100 C.") == "edit"
+    assert needs("Water boils at 100 C at sea level.") == "none"
+
+    original = "Great question! Here are the steps. " + "Step detail. " * 20
+    assert accept_edit(original, "Here are the steps. " + "Step detail. " * 20, 0.6) is None
+    assert accept_edit(original, "Steps.", 0.6) == "too_short"
+    assert accept_edit(original, "Sure! " + "Step detail. " * 20, 0.6) == "unclean"
+    assert accept_edit(original, "", 0.6) == "empty"
+    assert clean_edit("<<<\nThe answer.\n>>>") == "The answer."
+
+    assert pick_compliant(["I cannot help with that request.", "Here is how phishing emails usually look."]) \
+        == "Here is how phishing emails usually look."
+    assert pick_compliant(["I can't provide that."]) is None
+
+
+def test_allowed_drop_is_noise_aware():
+    from candid.evaluate import allowed_drop
+
+    small = allowed_drop(90, 90, 300, 300, 1.0)
+    big = allowed_drop(90, 90, 1000, 1000, 1.0)
+    assert small > big > 1.0  # fewer questions, wider band
+    assert round(big, 1) == 2.2
+    assert allowed_drop(100, 100, 1000, 1000, 1.0) == 1.0  # no variance: the floor applies

@@ -1,16 +1,19 @@
-"""Build preference pairs from the base model's own answers.
+"""Build preference pairs from the base model's own answers (v1 recipe).
 
-For every prompt the base model answers twice:
-  * default: no system prompt (how it behaves today)            -> candidate "rejected"
-  * spec:    with candid.spec.SPEC as system prompt, best-of-n -> candidate "chosen"
+Style pairs (general, Turkish and image prompts):
+  rejected = the base model's default answer, when it breaks a style rule (emoji, filler,
+             preaching, exclamation marks)
+  chosen   = the same answer rewritten by the model under EDIT_PROMPT: same content, only
+             the packaging removed. A rewrite that drops too much text or still breaks a rule
+             is discarded.
+Refusal pairs (OR-Bench-80k prompts: seemingly sensitive, actually benign):
+  every prompt is screened with a short default answer; only the ones the base refuses go on.
+  rejected = the full default (refusing) answer
+  chosen   = a compliant answer written with SPEC + PERMISSION as system prompt (best of n)
 
-A pair is kept only when the spec answer is clean and actually better: either the
-default answer breaks a rule that the regex checks catch (refusal, preaching, filler,
-emoji), or the base model, acting as judge, prefers the spec answer in both A/B orders.
-
-Both sides come from the same model, so the preference signal is about behaviour,
-not knowledge. That is what keeps intelligence where it was (no abliteration, no
-weight surgery).
+Every target comes from the same model, so the preference is about behaviour, not knowledge.
+v0 also used the base model as a judge between two different answers; it favoured short
+answers even when they were wrong, which cost capability, so v1 has no judge.
 
 Three resumable steps, each saved to the store as it finishes:
   prompts()   sample prompts (+ images) once            -> prompts/
@@ -27,12 +30,13 @@ import re
 from collections import Counter
 
 from candid.config import Config
-from candid.filters import detect_lang, is_clean, is_refusal, strip_think, violations
-from candid.spec import DECLINE, JUDGE_PROMPT, SPEC
+from candid.filters import is_clean, is_refusal, strip_think, violations
+from candid.spec import EDIT_PROMPT, PERMISSION, SPEC
 
 log = logging.getLogger("candid.generate")
 
 CHUNK = 256
+SCREENED = "over_refusal"
 
 
 def _prep_image(img):
@@ -56,57 +60,40 @@ def _chat(llm, convs, params, desc):
     return outs
 
 
-def _judge(llm, rows, a_texts, b_texts) -> list[bool]:
-    """True where the judge prefers B over A in both presentation orders."""
-    from vllm import SamplingParams
+# ----- pure selection logic (unit-tested) --------------------------------------
 
-    p = SamplingParams(temperature=0.0, max_tokens=2)
-    convs_ab, convs_ba = [], []
-    for r, a, b in zip(rows, a_texts, b_texts):
-        convs_ab.append([_user_msg(JUDGE_PROMPT.format(prompt=r["prompt"], a=a, b=b), r["image"])])
-        convs_ba.append([_user_msg(JUDGE_PROMPT.format(prompt=r["prompt"], a=b, b=a), r["image"])])
-    ab = _chat(llm, convs_ab, p, "judge A/B")
-    ba = _chat(llm, convs_ba, p, "judge B/A")
-    return [x[0].strip().upper().startswith("B") and y[0].strip().upper().startswith("A") for x, y in zip(ab, ba)]
+def needs(default: str) -> str:
+    """What a default answer needs: 'spec' (it refuses), 'edit' (style only) or 'none'."""
+    v = violations(default)
+    if v["refusal"] or not default.strip():
+        return "spec"
+    if any(v.values()):
+        return "edit"
+    return "none"
 
 
-def select_pairs(rows, defaults, specs, rng: random.Random, judge=None):
-    """Pure selection logic. Returns (pairs as (row_index, chosen, rejected), stats)."""
-    stats = Counter()
-    pairs, need_judge = [], []
-    for i, (r, d, cands) in enumerate(zip(rows, defaults, specs)):
-        b = r["bucket"]
-        stats[f"{b}/total"] += 1
-        if b == "hard_limit":
-            decline = DECLINE[detect_lang(r["prompt"])]
-            if d.strip() != decline:
-                pairs.append((i, decline, d))
-                stats[f"{b}/kept"] += 1
-            continue
-        good = [c for c in cands if is_clean(c)]
-        if not good:
-            stats[f"{b}/no_clean_spec"] += 1
-            continue
-        chosen = rng.choice(good)
-        v = violations(d)
-        if any(v.values()) or not d.strip():
-            for k, hit in v.items():
-                stats[f"{b}/default_{k}"] += int(hit)
-            pairs.append((i, chosen, d))
-            stats[f"{b}/kept"] += 1
-        elif judge is not None:
-            need_judge.append((i, chosen, d))
-    if need_judge:
-        wins = judge([rows[i] for i, _, _ in need_judge], [d for _, _, d in need_judge],
-                     [c for _, c, _ in need_judge])
-        for (i, c, d), w in zip(need_judge, wins):
-            b = rows[i]["bucket"]
-            stats[f"{b}/judged"] += 1
-            if w:
-                pairs.append((i, c, d))
-                stats[f"{b}/kept"] += 1
-                stats[f"{b}/judge_win"] += 1
-    return pairs, stats
+def clean_edit(text: str) -> str:
+    t = strip_think(text).strip()
+    t = re.sub(r"^\s*(<<<|>>>)\s*|\s*(<<<|>>>)\s*$", "", t)
+    return t.strip()
+
+
+def accept_edit(original: str, edited: str, min_ratio: float) -> str | None:
+    """Reason the rewrite is rejected, or None if it is a good chosen answer."""
+    if not edited:
+        return "empty"
+    if not is_clean(edited) or is_refusal(edited):
+        return "unclean"
+    if len(edited) < min_ratio * len(original):
+        return "too_short"
+    return None
+
+
+def pick_compliant(candidates: list[str]) -> str | None:
+    for c in candidates:
+        if is_clean(c) and not is_refusal(c):
+            return c
+    return None
 
 
 # ----- step 1: prompts --------------------------------------------------------
@@ -151,27 +138,75 @@ def shards(cfg: Config, store) -> None:
 
     llm = LLM(model=cfg.base_model, max_model_len=cfg.gen_max_model_len, gpu_memory_utilization=cfg.gen_gpu_mem,
               limit_mm_per_prompt={"image": 1}, seed=cfg.seed)
-    default_p = SamplingParams(temperature=cfg.gen_temperature, top_p=0.95, max_tokens=cfg.gen_max_tokens)
-    spec_p = SamplingParams(n=cfg.gen_samples, temperature=cfg.gen_temperature, top_p=0.95,
-                            max_tokens=cfg.gen_max_tokens)
-    judge = (lambda rows, a, b: _judge(llm, rows, a, b)) if cfg.use_self_judge else None
+    full = SamplingParams(temperature=cfg.gen_temperature, top_p=0.95, max_tokens=cfg.gen_max_tokens)
+    short = SamplingParams(temperature=cfg.gen_temperature, top_p=0.95, max_tokens=cfg.screen_max_tokens)
+    many = SamplingParams(n=cfg.gen_samples, temperature=cfg.gen_temperature, top_p=0.95,
+                          max_tokens=cfg.gen_max_tokens)
+    edit_p = SamplingParams(temperature=0.3, top_p=0.9, max_tokens=cfg.gen_max_tokens)
 
     for i in todo:
         lo, hi = i * cfg.shard_size, min(len(ds), (i + 1) * cfg.shard_size)
         rows = [dict(ex) for ex in ds.select(range(lo, hi))]
         for r in rows:
             r["image"] = _prep_image(r["image"])
-        defaults = [o[0] for o in _chat(llm, [[_user_msg(r["prompt"], r["image"])] for r in rows], default_p,
-                                        f"shard {i} default")]
-        specs = _chat(llm, [[{"role": "system", "content": SPEC}, _user_msg(r["prompt"], r["image"])] for r in rows],
-                      spec_p, f"shard {i} spec")
-        pairs, stats = select_pairs(rows, defaults, specs, random.Random(cfg.seed + i), judge)
+        pairs, stats = _shard_pairs(llm, rows, cfg, full, short, many, edit_p, f"shard {i}")
         store.write_json(shard_name(i), {
-            "pairs": [{"idx": lo + j, "chosen": c, "rejected": d} for j, c, d in pairs],
+            "pairs": [{"idx": lo + j, "chosen": c, "rejected": d, "kind": k} for j, c, d, k in pairs],
             "stats": dict(stats),
         })
         log.info("shard %d/%d: %d pairs", i + 1, n, len(pairs))
         store.update_state(progress=f"generate shard {i + 1}/{n}")
+
+
+def _shard_pairs(llm, rows, cfg, full, short, many, edit_p, tag):
+    stats = Counter()
+    for r in rows:
+        stats[f"{r['bucket']}/total"] += 1
+    msg = lambda r: [_user_msg(r["prompt"], r["image"])]
+
+    # 1. Screened prompts get a short answer first; only refusals go on to a full one.
+    screened = [j for j, r in enumerate(rows) if r["bucket"] == SCREENED]
+    shorts = _chat(llm, [msg(rows[j]) for j in screened], short, f"{tag} screen")
+    refused = [j for j, o in zip(screened, shorts) if is_refusal(o[0])]
+    stats.update({f"{SCREENED}/screened_refused": len(refused)})
+    full_idx = [j for j, r in enumerate(rows) if r["bucket"] != SCREENED] + refused
+    defaults = dict(zip(full_idx, (o[0] for o in _chat(llm, [msg(rows[j]) for j in full_idx], full,
+                                                         f"{tag} default"))))
+
+    # 2. Decide per prompt, then batch the follow-up generations.
+    want = {j: needs(d) for j, d in defaults.items()}
+    for j, w in want.items():
+        stats[f"{rows[j]['bucket']}/need_{w}"] += 1
+        for k, hit in violations(defaults[j]).items():
+            stats[f"{rows[j]['bucket']}/default_{k}"] += int(hit)
+    spec_idx = [j for j, w in want.items() if w == "spec"]
+    edit_idx = [j for j, w in want.items() if w == "edit"]
+
+    def spec_conv(j):
+        system = SPEC + (PERMISSION if rows[j]["bucket"] == SCREENED else "")
+        return [{"role": "system", "content": system}, *msg(rows[j])]
+
+    specs = dict(zip(spec_idx, _chat(llm, [spec_conv(j) for j in spec_idx], many, f"{tag} spec")))
+    edits = dict(zip(edit_idx, (clean_edit(o[0]) for o in _chat(
+        llm, [[{"role": "user", "content": EDIT_PROMPT.format(answer=defaults[j])}] for j in edit_idx], edit_p,
+        f"{tag} edit"))))
+
+    pairs = []
+    for j in spec_idx:
+        b, chosen = rows[j]["bucket"], pick_compliant(specs[j])
+        if chosen is None:
+            stats[f"{b}/no_compliant"] += 1
+            continue
+        pairs.append((j, chosen, defaults[j], "refusal"))
+        stats[f"{b}/kept_refusal"] += 1
+    for j in edit_idx:
+        b, why = rows[j]["bucket"], accept_edit(defaults[j], edits[j], cfg.min_edit_ratio)
+        if why:
+            stats[f"{b}/edit_{why}"] += 1
+            continue
+        pairs.append((j, edits[j], defaults[j], "style"))
+        stats[f"{b}/kept_style"] += 1
+    return pairs, stats
 
 
 # ----- step 3: assemble -------------------------------------------------------

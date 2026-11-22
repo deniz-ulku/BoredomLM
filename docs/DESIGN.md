@@ -36,20 +36,34 @@ Training from scratch was dropped for v0: the budget is $50, which buys a toy mo
 
 No abliteration. Abliteration edits weights directly and measurably costs some capability.
 
-Instead, on-policy context distillation with DPO:
-- Both answers in a pair come from the base model itself (default vs. with the spec as system prompt), so the preference signal is about behaviour, not facts or reasoning.
+Instead, preference training (DPO + a small NLL term) on pairs whose both sides come from the base model itself, so the signal is about behaviour, not facts or reasoning:
 - LoRA on the language model only; vision tower and DeltaNet gates frozen.
 - The DPO reference is the frozen base, which keeps the policy close to it.
-- A small NLL term on the chosen answer keeps answers fluent.
-- Off-policy image-hallucination pairs (RLAIF-V) are mixed in to strengthen "only say what is visible".
+- Off-policy image-hallucination pairs (RLAIF-V) strengthen "only say what is visible".
 
-Release gate (`candid/evaluate.py`):
-- gsm8k, MMLU-Pro, Global-MMLU (Turkish), ChartQA: at most 1 point drop each.
-- Over-refusal on OR-Bench-Hard-1k must go down. That set is excluded from training.
-- Refusal rate on hard-limit prompts must not fall.
-- Emoji, filler, preaching rates and answer length are reported.
+### v0 result (failed the gate)
 
-v0 trains non-thinking mode only. Thinking mode stays as the base shipped it.
+| | base | tuned |
+|---|---|---|
+| GSM8K | 91.3 | 89.7 |
+| MMLU-Pro | 60.0 | 64.7 |
+| Global-MMLU TR | 68.3 | 66.0 |
+| ChartQA | 90.7 | 90.3 |
+| Over-refusal, OR-Bench-Hard (lower is better) | 77.3 | 85.3 |
+
+300 questions per benchmark. What went wrong, from the data report:
+- Refusal signal was weak: the base refused only 204 of 2,500 OR-Bench-80k training prompts, while it refuses 77% of the hard eval set.
+- A third of the pairs came from the base model judging two different answers. It preferred short ones even when they were wrong, which plausibly cost the GSM8K and Turkish points.
+- The spec's "as short as possible" made answers drop content.
+
+### v1 recipe
+
+- **Style pairs:** chosen = the model's own default answer rewritten under `EDIT_PROMPT` (same content; emojis, filler, preaching and AI disclaimers removed). A rewrite that loses more than 40% of the text or still breaks a rule is discarded. No judge.
+- **Refusal pairs:** 15,000 OR-Bench-80k prompts are screened with a 96-token answer; only the refused ones get a full default (rejected) and compliant candidates written with `SPEC + PERMISSION` (chosen).
+- **Spec:** "keep all the substance; cut only filler" instead of "as short as possible".
+- **Gate:** 1,000 questions per capability benchmark; a benchmark fails when its drop exceeds both 1 point and the one-sided 95% noise band of the difference (about 2.2 points at 90% accuracy). Over-refusal must go down (500 prompts).
+
+Non-thinking mode only. Thinking mode stays as the base shipped it.
 
 ## Hard limits
 
@@ -57,7 +71,7 @@ Candid answers everything except:
 1. Sexual content involving minors.
 2. Meaningful uplift toward weapons capable of mass casualties.
 
-These are the only declines. They are required for App Store and Google Play distribution of a generative AI app, and they are the right line. In training, prompts that hit these limits get a one-line plain decline as the chosen answer, no lecture.
+These are the only declines. They are required for App Store and Google Play distribution of a generative AI app, and they are the right line. The base model already refuses these on its own; training neither teaches nor removes that, and the gate checks the refusal rate on them does not fall.
 
 ## Search
 

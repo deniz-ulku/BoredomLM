@@ -77,6 +77,15 @@ cd code && bash remote/run.sh
 """
 
 
+def current_run() -> str:
+    """The run named in remote/RUN; machines read the same file from GitHub."""
+    try:
+        with open(os.path.join(ROOT, "remote", "RUN")) as f:
+            return f.read().strip() or "v1"
+    except FileNotFoundError:
+        return "v1"
+
+
 # ----- vast client -------------------------------------------------------------
 
 def vast():
@@ -443,7 +452,7 @@ def cmd_logs(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run", default="v0")
+    ap.add_argument("--run", default=current_run(), help="default: the name in remote/RUN")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("offers")
     p.add_argument("--max-dph", type=float, default=1.0)

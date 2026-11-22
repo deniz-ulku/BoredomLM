@@ -12,7 +12,9 @@
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
-export CANDID_RUN="${CANDID_RUN:-v0}"
+# remote/RUN (from GitHub) names the current run, so an existing machine can move on to the next run.
+[[ -f remote/RUN ]] && CANDID_RUN="$(tr -d '[:space:]' < remote/RUN)"
+export CANDID_RUN="${CANDID_RUN:-v1}"
 export CANDID_WORK_DIR="/workspace/work/runs/$CANDID_RUN"
 export PYTHONUNBUFFERED=1
 mkdir -p "$CANDID_WORK_DIR"

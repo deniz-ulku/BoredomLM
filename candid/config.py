@@ -14,28 +14,30 @@ from dataclasses import dataclass, field, fields
 class Config:
     # Base model: Apache-2.0, natively multimodal, 3:1 Gated DeltaNet / attention hybrid.
     base_model: str = "Qwen/Qwen3.5-4B"
-    run: str = "v0"               # run name; state lives under runs/<run>/ in the Hub repo
-    work_dir: str = "hub/runs/v0"  # local mirror of runs/<run>/ (see candid/store.py)
+    run: str = "v1"               # run name (remote/RUN picks it on the machines)
+    work_dir: str = "hub/runs/v1"  # local mirror of runs/<run>/ (see candid/store.py)
     seed: int = 0
 
-    # Prompt mix (number of prompts drawn per bucket; see candid/sources.py). About half the
-    # prompts become pairs (smoke run: 31 of 57), so this is ~5-6k pairs, ~4 h of training on
-    # an RTX 5090. Over-refusal stays largest: the base refused 80% of OR-Bench-Hard prompts.
-    n_general_en: int = 2000
-    n_general_tr: int = 2000
-    n_over_refusal: int = 2500
-    n_hard_limit: int = 300
-    n_image: int = 2000
-    n_image_pref: int = 1000  # off-policy hallucination preference pairs (RLAIF-V)
+    # Prompt mix (number of prompts drawn per bucket; see candid/sources.py).
+    # v0 lesson: the base refused only ~8% of OR-Bench-80k prompts, so v1 screens many of them
+    # cheaply and builds pairs only from the ones it actually refuses. General and image prompts
+    # become pairs only when the default answer breaks a style rule.
+    n_general_en: int = 1500
+    n_general_tr: int = 1500
+    n_over_refusal: int = 15000   # screened; ~8% are expected to be refused and become pairs
+    n_hard_limit: int = 0         # base refuses these on its own; no training either way
+    n_image: int = 1500
+    n_image_pref: int = 800       # off-policy hallucination preference pairs (RLAIF-V)
 
     # On-policy generation (vLLM). Work is split into shards that are saved as they finish.
     shard_size: int = 500
-    gen_samples: int = 3          # best-of-n samples with the behaviour spec
+    screen_max_tokens: int = 96   # enough to see whether an answer starts with a refusal
+    gen_samples: int = 4          # compliant candidates per refused prompt
     gen_temperature: float = 0.7
     gen_max_tokens: int = 1536
     gen_max_model_len: int = 8192
     gen_gpu_mem: float = 0.85
-    use_self_judge: bool = True   # base model compares default vs spec answer, both orders
+    min_edit_ratio: float = 0.6   # a rewrite shorter than this share of the original lost content
 
     # Preference training (LoRA on the language model only; the vision tower stays frozen).
     lora_r: int = 32
@@ -52,9 +54,11 @@ class Config:
     train_max_pixels: int = 1024 * 1024
     ckpt_minutes: float = 15      # save + upload a training checkpoint this often
 
-    # Evaluation gate: tuned model may lose at most this many points on any capability benchmark.
+    # Evaluation gate: a capability benchmark fails when the drop exceeds both this many points
+    # and the 95% noise band of the difference (two independent samples of eval_limit questions).
     max_capability_drop: float = 1.0
-    eval_limit: int = 300         # examples per benchmark
+    eval_limit: int = 1000        # examples per capability benchmark
+    eval_behaviour_limit: int = 500  # over-refusal prompts
 
     # Outputs.
     hub_repo: str = ""            # e.g. "your-name/candid-4b-v0" (private). Empty = no upload.
