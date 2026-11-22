@@ -85,6 +85,11 @@ def run(cfg: Config, store, fns=None) -> dict:
         log.info("backed up to the Hub: %s", backfilled)
     state = store.state()
     stale = [st for st, out in STAGE_OUTPUTS.items() if st in state["done"] and not store.exists(out)]
+    redo = [st for st in cfg.redo if st in STAGES]
+    if redo and state.get("redo_applied") != redo:
+        log.info("redo requested: %s", redo)
+        stale = sorted(set(stale) | set(redo), key=STAGES.index)
+        state = store.update_state(redo_applied=redo)
     if stale:
         # Everything after the earliest stale stage depends on it, so it is redone too.
         first = min(STAGES.index(st) for st in stale)

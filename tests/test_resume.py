@@ -263,3 +263,31 @@ def test_stale_stage_redoes_everything_after_it(tmp_path):
     fns = {st: (lambda cfg, store, name=st: calls.append(name)) for st in STAGES}
     run(cfg, s, fns)
     assert calls == ["train", "eval_tuned", "gate", "export"]
+
+
+def test_redo_runs_a_finished_stage_again_once(tmp_path):
+    cfg, s = Config(work_dir=str(tmp_path / "runs" / "t"), run="t", redo=["export"]), _store(tmp_path)
+    for out in ("prompts", "pairs", "adapter", "gguf"):
+        os.makedirs(s.local(out))
+    s.update_state(done=list(STAGES), finished=True)
+    calls = []
+    fns = {st: (lambda cfg, store, name=st: calls.append(name)) for st in STAGES}
+    run(cfg, s, fns)
+    assert calls == ["export"]
+    run(cfg, s, fns)  # a restart with the same RUN file must not export again
+    assert calls == ["export"]
+
+
+def test_export_converter_matches_the_llama_cpp_the_app_ships():
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    info = root / "app/node_modules/llama.rn/cpp/common/build-info.cpp"
+    if not info.exists():
+        import pytest
+
+        pytest.skip("app dependencies not installed")
+    build = re.search(r"LLAMA_BUILD_NUMBER = (\d+)", info.read_text()).group(1)
+    pinned = re.search(r'CANDID_LLAMA_CPP_REF:-b(\d+)', (root / "remote/export_gguf.sh").read_text()).group(1)
+    assert pinned == build

@@ -5,8 +5,14 @@ W="${CANDID_WORK_DIR:-/workspace/work}"
 QUANTS="${CANDID_GGUF_QUANTS:-Q4_K_M,Q8_0}"
 OUT="$W/gguf"; mkdir -p "$OUT"
 
-[[ -d /workspace/llama.cpp ]] || git clone --depth 1 https://github.com/ggml-org/llama.cpp /workspace/llama.cpp
-cd /workspace/llama.cpp
+# The converter must match the llama.cpp the app ships: llama.rn 0.12.9 bundles build b10256
+# (app/node_modules/llama.rn/cpp/common/build-info.cpp). Newer converters fuse the DeltaNet
+# projections (attn_qkv_gate, ssm_beta_alpha), which that build cannot load. Bump together with
+# llama.rn; tests/test_pipeline.py checks the two agree.
+LLAMA_CPP_REF="${CANDID_LLAMA_CPP_REF:-b10256}"
+LC="/workspace/llama.cpp-$LLAMA_CPP_REF"
+[[ -d "$LC" ]] || git clone --depth 1 --branch "$LLAMA_CPP_REF" https://github.com/ggml-org/llama.cpp "$LC"
+cd "$LC"
 PY=$(command -v python3 || command -v python)
 "$PY" -m pip install -q -c /workspace/constraints.txt ./gguf-py
 cmake -B build -DGGML_CUDA=OFF -DLLAMA_CURL=OFF >/dev/null
@@ -30,3 +36,4 @@ for i in "${!QS[@]}"; do
 done
 rm -f "$OUT/candid-4b-f16.gguf"   # large and not needed on phones
 ls -lh "$OUT"
+echo "[export] converted with llama.cpp $LLAMA_CPP_REF"
