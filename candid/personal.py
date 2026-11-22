@@ -2,8 +2,12 @@
 
 Three synthetic users each give ~50 corrections to Candid. A phone-sized LoRA (rank 8,
 512 tokens) is trained on top of the shipped model, once per user, like one night on the
-phone. Reported per user: training time, how often held-out answers now match what the user
-wants (before vs after), and GSM8K accuracy before vs after.
+phone. Reported per user and training setting: training time, how often held-out answers now
+match what the user wants (before vs after), and GSM8K accuracy before vs after.
+
+First run (lr 2e-5, NLL weight 0.2): nothing moved (terse 0 -> 0, formal_tr 0 -> 0), GSM8K
+held. The pairs were learned (reward accuracy 1.0) but greedy answers did not change, so
+the settings below are stronger.
 
     CANDID_MODE=personal on the machine (see remote/run.sh), or python -m candid.personal
 """
@@ -120,12 +124,14 @@ def split_prompts(prompts: list[str], seed: int, n_train: int = 45) -> tuple[lis
 
 
 def user_messages(persona: Persona, prompt: str) -> list[dict]:
-    """How the user asks: facts users said once, earlier; the phone keeps that context."""
-    if persona.facts:
-        return [{"role": "user", "content": " ".join(persona.facts)},
-                {"role": "assistant", "content": "Noted."},
-                {"role": "user", "content": prompt}]
+    """How the user asks: just the question. The facts persona told its facts in an earlier
+    conversation that is no longer in context, so remembering them has to come from the weights
+    (with the facts in context the base model already uses them every time)."""
     return [{"role": "user", "content": prompt}]
+
+
+# (name, learning rate, NLL weight next to DPO). Phone cost is the same for all of them.
+SETTINGS = [("lr1e-4", 1e-4, 1.0), ("lr2e-4", 2e-4, 1.0)]
 
 
 def correction(persona: Persona, answer: str) -> str:
@@ -157,7 +163,7 @@ def _gsm8k(llm, n: int, seed: int) -> float:
     return round(100 * sum(hits) / max(1, len(hits)), 1)
 
 
-def _train(base: str, pairs: list[dict], out: str, cfg: Config) -> float:
+def _train(base: str, pairs: list[dict], out: str, cfg: Config, lr: float, nll: float) -> float:
     """Phone-sized LoRA on top of the shipped model; returns training seconds."""
     import torch
     from datasets import Dataset
@@ -172,9 +178,9 @@ def _train(base: str, pairs: list[dict], out: str, cfg: Config) -> float:
     model.config.use_cache = False
     ds = Dataset.from_list(pairs)
     args = DPOConfig(output_dir=out + "-ckpt", per_device_train_batch_size=1, gradient_accumulation_steps=4,
-                     learning_rate=2e-5, num_train_epochs=3, lr_scheduler_type="cosine", warmup_steps=0.1,
+                     learning_rate=lr, num_train_epochs=3, lr_scheduler_type="cosine", warmup_steps=0.1,
                      bf16=True, gradient_checkpointing=True, gradient_checkpointing_kwargs={"use_reentrant": False},
-                     beta=0.1, loss_type=["sigmoid", "sft"], loss_weights=[1.0, 0.2], max_length=512,
+                     beta=0.1, loss_type=["sigmoid", "sft"], loss_weights=[1.0, nll], max_length=512,
                      truncation_mode="keep_start", save_strategy="no", report_to="none", logging_steps=5,
                      seed=cfg.seed)
     peft = LoraConfig(r=8, lora_alpha=16, target_modules=LORA_TARGETS, task_type="CAUSAL_LM")
@@ -225,29 +231,31 @@ def run(cfg: Config, base: str, work: str, n_gsm8k: int = 200) -> dict:
     from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(base)
-    for p in PERSONAS:
-        train_p, test_p, chosen, rejected, before = plans[p.name]
-        pairs = []
-        for q, c, r in zip(train_p, chosen, rejected):
-            if c.strip() == r.strip() or not c.strip():
-                continue
-            prompt = processor.apply_chat_template(user_messages(p, q), add_generation_prompt=True, tokenize=False,
-                                                   enable_thinking=False)
-            pairs.append({"prompt": prompt, "chosen": c + "<|im_end|>\n", "rejected": r + "<|im_end|>\n"})
-        out = os.path.join(work, f"personal-{p.name}")
-        secs = _train(base, pairs, out, cfg)
-        llm = _llm(out, cfg)
-        after = _answer(llm, [user_messages(p, q) for q in test_p])
-        after_gsm = _gsm8k(llm, n_gsm8k, cfg.seed)
-        llm = None
-        _free_gpu()
-        shutil.rmtree(out, ignore_errors=True)
-        shutil.rmtree(out + "-ckpt", ignore_errors=True)
-        results[p.name] = {"pairs": len(pairs), "train_seconds": round(secs),
-                           "match_before": match_rate(p.check, before), "match_after": match_rate(p.check, after),
-                           "gsm8k_before": before_gsm, "gsm8k_after": after_gsm,
-                           "sample_after": after[0][:300] if after else ""}
-        print("[personal] " + json.dumps({p.name: results[p.name]}, ensure_ascii=False)[:480], flush=True)
+    for name, lr, nll in SETTINGS:
+        for p in PERSONAS:
+            train_p, test_p, chosen, rejected, before = plans[p.name]
+            pairs = []
+            for q, c, r in zip(train_p, chosen, rejected):
+                if c.strip() == r.strip() or not c.strip():
+                    continue
+                prompt = processor.apply_chat_template(user_messages(p, q), add_generation_prompt=True,
+                                                       tokenize=False, enable_thinking=False)
+                pairs.append({"prompt": prompt, "chosen": c + "<|im_end|>\n", "rejected": r + "<|im_end|>\n"})
+            out = os.path.join(work, f"personal-{p.name}")
+            secs = _train(base, pairs, out, cfg, lr, nll)
+            llm = _llm(out, cfg)
+            after = _answer(llm, [user_messages(p, q) for q in test_p])
+            after_gsm = _gsm8k(llm, n_gsm8k, cfg.seed)
+            llm = None
+            _free_gpu()
+            shutil.rmtree(out, ignore_errors=True)
+            shutil.rmtree(out + "-ckpt", ignore_errors=True)
+            key = f"{p.name}/{name}"
+            results[key] = {"pairs": len(pairs), "train_seconds": round(secs),
+                            "match_before": match_rate(p.check, before), "match_after": match_rate(p.check, after),
+                            "gsm8k_before": before_gsm, "gsm8k_after": after_gsm,
+                            "sample_after": after[0][:160] if after else ""}
+            print("[personal] " + json.dumps({key: results[key]}, ensure_ascii=False)[:480], flush=True)
     return results
 
 
@@ -265,3 +273,4 @@ if __name__ == "__main__":
     res = run(cfg, base, "/workspace/work/personal")
     with open("/workspace/work/personal/results.json", "w") as f:
         json.dump(res, f, indent=2, ensure_ascii=False)
+    cfg.store().write_json("personal/results.json", res)  # mirrored to the Hub when a token is set

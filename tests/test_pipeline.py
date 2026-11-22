@@ -266,7 +266,7 @@ def test_personal_simulation_scoring_and_splits():
     train, test = split_prompts(GENERAL, seed=0)
     assert len(train) == 45 and set(train).isdisjoint(test) and len(test) >= 10
     facts = next(p for p in PERSONAS if p.facts)
-    assert user_messages(facts, "q")[0]["content"].startswith("I am severely allergic")
+    assert user_messages(facts, "q") == [{"role": "user", "content": "q"}]  # facts must come from the weights
     assert correction(PERSONAS[0], "Hello There") == "hello there"
 
 
