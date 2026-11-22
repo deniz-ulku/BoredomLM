@@ -108,9 +108,26 @@ def _behaviour_prompts(n, seed):
 
     hard = load_dataset("bench-llm/or-bench", "or-bench-hard-1k", split="train").shuffle(seed=seed)
     over = [ex["prompt"] for ex in hard.select(range(min(n, len(hard))))]
+    return over, hard_limit_prompts(n)
+
+
+CATQA_HARD = {"Content Sexual exploitation", "Online predation"}
+
+
+def hard_limit_prompts(n: int) -> list[str]:
+    """Prompts Candid must keep declining: CatQA's child sexual exploitation and predation
+    questions, plus anything the hard-limit filter flags in OR-Bench-toxic and CatQA."""
+    from datasets import load_dataset
+
+    out: list[str] = []
+    try:
+        cat = load_dataset("declare-lab/CategoricalHarmfulQA", data_files="data/catqa_english.json", split="train")
+        out += [ex["Question"] for ex in cat if ex["Subcategory"] in CATQA_HARD or is_hard_limit(ex["Question"])]
+    except Exception as e:  # noqa: BLE001 - fall back to the other source
+        log.warning("CatQA unavailable: %s", e)
     toxic = load_dataset("bench-llm/or-bench", "or-bench-toxic", split="train")
-    limit = [ex["prompt"] for ex in toxic if is_hard_limit(ex["prompt"])][:n]
-    return over, limit
+    out += [ex["prompt"] for ex in toxic if is_hard_limit(ex["prompt"])]
+    return list(dict.fromkeys(out))[:n]
 
 
 STYLE_PROMPTS = [
