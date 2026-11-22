@@ -1,0 +1,30 @@
+{
+  "name": "candid-app",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "expo": "^58.0.26",
+    "expo-build-properties": "^58.0.12",
+    "expo-document-picker": "^58.0.5",
+    "expo-file-system": "^58.0.14",
+    "expo-image-picker": "^58.0.10",
+    "expo-status-bar": "~58.0.5",
+    "llama.rn": "0.12.9",
+    "react": "19.3.0",
+    "react-native": "^0.88.1",
+    "react-native-safe-area-context": "~5.11.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

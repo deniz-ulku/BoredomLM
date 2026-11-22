@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "Candid",
+    "slug": "candid",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "bundleIdentifier": "app.candid.ios",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Take a photo to ask Candid about it.",
+        "NSPhotoLibraryUsageDescription": "Choose photos to ask Candid about them."
+      }
+    },
+    "android": {
+      "package": "app.candid.android",
+      "permissions": ["CAMERA", "INTERNET"]
+    },
+    "plugins": [
+      ["llama.rn", { "enableEntitlements": true, "entitlementsProfile": "production", "forceCxx20": true, "enableOpenCLAndHexagon": true }],
+      ["expo-image-picker", { "cameraPermission": "Take a photo to ask Candid about it.", "photosPermission": "Choose photos to ask Candid about them." }],
+      "expo-document-picker"
+    ]
+  }
+}

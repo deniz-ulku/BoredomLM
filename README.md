@@ -31,9 +31,10 @@ candid/
   train.py       DPO + NLL, LoRA, merge
   evaluate.py    before/after benchmarks and the release gate
   search/        keyless web search (SearXNG, ddgs, Wikipedia), page fetch, tool schema
-remote/          what runs on the GPU machine: pipeline, GGUF export, Hub upload
-vast/launch.py   start / watch / stop vast.ai runs with a hard budget
+remote/          what runs on the GPU machine: pipeline, GGUF export
+vast/launch.py   supervisor: start / stop / rescue vast.ai machines as credit allows
 tests/
+app/             the iPhone + Android app (Expo, llama.rn); see app/README.md
 ```
 
 ## Running a training run
