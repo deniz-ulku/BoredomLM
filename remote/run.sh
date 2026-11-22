@@ -68,4 +68,9 @@ command -v git >/dev/null && command -v cmake >/dev/null || \
   "flash-linear-attention==0.6.0" "ddgs==9.16.1" "trafilatura==2.3.1" || exit 3
 
 # Exit code 124 = this start's time limit; the supervisor simply starts the machine again.
-timeout "${CANDID_MAX_HOURS:-12}h" "$PY" -m candid.pipeline
+if [[ "${CANDID_MODE:-pipeline}" == "personal" ]]; then
+  # On-device learning simulation (candid/personal.py) on top of this run's merged model.
+  timeout "${CANDID_MAX_HOURS:-12}h" "$PY" -m candid.personal
+else
+  timeout "${CANDID_MAX_HOURS:-12}h" "$PY" -m candid.pipeline
+fi

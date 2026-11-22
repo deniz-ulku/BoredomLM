@@ -249,3 +249,22 @@ def test_shard_pairs_end_to_end_with_fake_model():
     assert by_row[3][0] == HEADACHE_STEPS  # model rewrite for preaching
     assert stats["over_refusal/screened_refused"] == 1 and stats["general_en/need_none"] == 1
     assert stats["general_en/model_edit"] == 1 and rejects == []
+
+
+def test_personal_simulation_scoring_and_splits():
+    from candid.personal import FACT_PROMPTS, GENERAL, PERSONAS, correction, persona_score, split_prompts, user_messages
+
+    assert persona_score("terse", "just restart it. that usually helps.")
+    assert not persona_score("terse", "Just restart it.")
+    assert not persona_score("terse", "steps:\n- one\n- two")
+    assert persona_score("formal_tr", "Bunu yapmak için önce ayarlarınızı kontrol etmenizi öneririm.")
+    assert not persona_score("formal_tr", "Ayarlara bak, yeter.")
+    assert not persona_score("formal_tr", "Deniz kenarında yürü, iyi gelir.")  # "deniz" is not a siz form
+    assert persona_score("facts", "Try apple slices; skip anything with peanuts.")
+    assert not persona_score("facts", "Try a granola bar.")
+    assert len(GENERAL) >= 55 and len(FACT_PROMPTS) >= 55
+    train, test = split_prompts(GENERAL, seed=0)
+    assert len(train) == 45 and set(train).isdisjoint(test) and len(test) >= 10
+    facts = next(p for p in PERSONAS if p.facts)
+    assert user_messages(facts, "q")[0]["content"].startswith("I am severely allergic")
+    assert correction(PERSONAS[0], "Hello There") == "hello there"
