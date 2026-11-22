@@ -52,7 +52,8 @@ def _stage_fns():
         # whether it passed the gate.
         if store.state().get("gate") != "PASS":
             log.info("gate did not pass; exporting anyway for inspection, not for release")
-        train.merge(cfg, store)
+        merged = train.merge(cfg, store)
+        train.add_mtp(merged, cfg.base_model)  # merges saved before add_mtp existed lack the head
         env = {**os.environ, "CANDID_WORK_DIR": os.path.abspath(store.work_dir),
                "CANDID_GGUF_QUANTS": ",".join(cfg.gguf_quants)}
         subprocess.run(["bash", "remote/export_gguf.sh"], check=True, env=env)
@@ -85,11 +86,12 @@ def run(cfg: Config, store, fns=None) -> dict:
         log.info("backed up to the Hub: %s", backfilled)
     state = store.state()
     stale = [st for st, out in STAGE_OUTPUTS.items() if st in state["done"] and not store.exists(out)]
+    # cfg.redo is applied once per exact value; add any tag ("export,2") to redo the same stage again.
     redo = [st for st in cfg.redo if st in STAGES]
-    if redo and state.get("redo_applied") != redo:
-        log.info("redo requested: %s", redo)
+    if redo and state.get("redo_applied") != cfg.redo:
+        log.info("redo requested: %s", cfg.redo)
         stale = sorted(set(stale) | set(redo), key=STAGES.index)
-        state = store.update_state(redo_applied=redo)
+        state = store.update_state(redo_applied=cfg.redo)
     if stale:
         # Everything after the earliest stale stage depends on it, so it is redone too.
         first = min(STAGES.index(st) for st in stale)

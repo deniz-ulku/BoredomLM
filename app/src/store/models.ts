@@ -23,7 +23,7 @@ export const CATALOG: ModelSpec[] = [
     id: "candid-4b",
     name: "Candid 4B",
     description: "Our trained model. Downloads from the private Candid repo (needs a Hugging Face token in Settings), or import the two .gguf files.",
-    model: { filename: "candid-4b-Q4_K_M.gguf", url: CANDID + "candid-4b-Q4_K_M.gguf", bytes: 2_741_241_728 },
+    model: { filename: "candid-4b-Q4_K_M.gguf", url: CANDID + "candid-4b-Q4_K_M.gguf", bytes: 2_708_803_872 },
     mmproj: { filename: "candid-4b-mmproj-f16.gguf", url: CANDID + "candid-4b-mmproj-f16.gguf", bytes: 672_422_944 },
   },
   {

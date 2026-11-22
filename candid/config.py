@@ -64,7 +64,8 @@ class Config:
     hub_repo: str = ""            # e.g. "your-name/candid-4b-v0" (private). Empty = no upload.
     gguf_quants: list[str] = field(default_factory=lambda: ["Q4_K_M", "Q8_0"])
     # Stages to run again once for a finished run (e.g. "export" after a converter change).
-    # Applied once per value: state["redo_applied"] remembers it, so restarts do not loop.
+    # Applied once per value: state["redo_applied"] remembers it, so restarts do not loop;
+    # extra tags that are not stage names ("export,2") make a new value for another redo.
     redo: list[str] = field(default_factory=list)
 
     @classmethod

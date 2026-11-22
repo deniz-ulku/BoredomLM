@@ -165,6 +165,86 @@ def merge(cfg: Config, store) -> str:
     shutil.rmtree(tmp, ignore_errors=True)
     merged.save_pretrained(tmp, safe_serialization=True)
     AutoProcessor.from_pretrained(cfg.base_model).save_pretrained(tmp)
+    add_mtp(tmp, cfg.base_model)
     shutil.rmtree(out, ignore_errors=True)
     os.replace(tmp, out)
     return out
+
+
+MTP_FILE = "model-mtp.safetensors"  # "model*" so llama.cpp's converter picks it up
+
+
+def _st_header(path: str) -> tuple[dict, int]:
+    """safetensors header (name -> dtype/shape/data_offsets) and where the data starts."""
+    import json
+    import struct
+
+    with open(path, "rb") as f:
+        (n,) = struct.unpack("<Q", f.read(8))
+        return json.loads(f.read(n)), 8 + n
+
+
+def _copy_tensors(sources: dict[str, str], dst: str) -> None:
+    """Write tensors (name -> source safetensors file) to dst byte for byte, any dtype, no torch."""
+    import json
+    import struct
+
+    header, blobs, pos = {}, [], 0
+    for name, path in sorted(sources.items()):
+        h, base = _st_header(path)
+        a, b = h[name]["data_offsets"]
+        with open(path, "rb") as f:
+            f.seek(base + a)
+            blobs.append(f.read(b - a))
+        header[name] = {"dtype": h[name]["dtype"], "shape": h[name]["shape"], "data_offsets": [pos, pos + b - a]}
+        pos += b - a
+    header["__metadata__"] = {"format": "pt"}
+    raw = json.dumps(header, separators=(",", ":")).encode()
+    raw += b" " * (-len(raw) % 8)
+    with open(dst + ".tmp", "wb") as f:
+        f.write(struct.pack("<Q", len(raw)) + raw)
+        for blob in blobs:
+            f.write(blob)
+    os.replace(dst + ".tmp", dst)
+
+
+def add_mtp(merged: str, base_model: str, download=None) -> int:
+    """Put the base checkpoint's mtp.* tensors back into a merged checkpoint.
+
+    transformers drops Qwen3.5's multi-token-prediction head when it loads the model, so a
+    merged save has none while config.json still declares mtp_num_hidden_layers. The GGUF
+    converter then declares an extra block with no weights, which llama.cpp cannot load.
+    LoRA never touches the head, so the base tensors are copied unchanged; phones can use
+    them for MTP speculative decoding. A base without a head gets the layer count set to 0.
+    Returns the number of tensors added."""
+    import json
+
+    if download is None:
+        from huggingface_hub import hf_hub_download as download
+    idx_path = os.path.join(merged, "model.safetensors.index.json")
+    if os.path.exists(idx_path):
+        with open(idx_path) as f:
+            idx = json.load(f)
+    else:
+        h, _ = _st_header(os.path.join(merged, "model.safetensors"))
+        idx = {"metadata": {}, "weight_map": {k: "model.safetensors" for k in h if k != "__metadata__"}}
+    if any(k.startswith("mtp.") for k in idx["weight_map"]):
+        return 0
+    with open(download(base_model, "model.safetensors.index.json")) as f:
+        want = {k: v for k, v in json.load(f)["weight_map"].items() if k.startswith("mtp.")}
+    if not want:
+        cfg_path = os.path.join(merged, "config.json")
+        with open(cfg_path) as f:
+            conf = json.load(f)
+        conf.get("text_config", conf)["mtp_num_hidden_layers"] = 0
+        with open(cfg_path, "w") as f:
+            json.dump(conf, f, indent=2)
+        return 0
+    shards = {shard: download(base_model, shard) for shard in sorted(set(want.values()))}
+    _copy_tensors({k: shards[v] for k, v in want.items()}, os.path.join(merged, MTP_FILE))
+    idx["weight_map"].update({k: MTP_FILE for k in want})
+    with open(idx_path + ".tmp", "w") as f:
+        json.dump(idx, f, indent=2)
+    os.replace(idx_path + ".tmp", idx_path)
+    log.info("added %d mtp tensors from %s", len(want), base_model)
+    return len(want)

@@ -276,6 +276,9 @@ def test_redo_runs_a_finished_stage_again_once(tmp_path):
     assert calls == ["export"]
     run(cfg, s, fns)  # a restart with the same RUN file must not export again
     assert calls == ["export"]
+    cfg.redo = ["export", "2"]  # a new tag asks for one more
+    run(cfg, s, fns)
+    assert calls == ["export", "export"]
 
 
 def test_export_converter_matches_the_llama_cpp_the_app_ships():
@@ -291,3 +294,35 @@ def test_export_converter_matches_the_llama_cpp_the_app_ships():
     build = re.search(r"LLAMA_BUILD_NUMBER = (\d+)", info.read_text()).group(1)
     pinned = re.search(r'CANDID_LLAMA_CPP_REF:-b(\d+)', (root / "remote/export_gguf.sh").read_text()).group(1)
     assert pinned == build
+
+
+def test_add_mtp_copies_the_head_once(tmp_path):
+    import json
+
+    import pytest
+
+    np = pytest.importorskip("numpy")
+    st = pytest.importorskip("safetensors.numpy")
+    load_file, save_file = st.load_file, st.save_file
+
+    from candid.train import MTP_FILE, add_mtp
+
+    base, merged = tmp_path / "base", tmp_path / "merged"
+    base.mkdir(), merged.mkdir()
+    save_file({"model.w": np.zeros(2, np.float32), "mtp.fc.weight": np.arange(6, dtype=np.float16).reshape(2, 3)},
+              str(base / "s1.safetensors"))
+    save_file({"mtp.norm.weight": np.full(2, 2.0, np.float32)}, str(base / "s2.safetensors"))
+    (base / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {
+        "model.w": "s1.safetensors", "mtp.fc.weight": "s1.safetensors", "mtp.norm.weight": "s2.safetensors"}}))
+    save_file({"model.w": np.zeros(2, np.float32)}, str(merged / "model.safetensors"))  # single-file save
+
+    def download(repo, name):
+        return str(base / name)
+
+    assert add_mtp(str(merged), "base", download) == 2
+    idx = json.loads((merged / "model.safetensors.index.json").read_text())
+    assert idx["weight_map"]["mtp.norm.weight"] == MTP_FILE and idx["weight_map"]["model.w"] == "model.safetensors"
+    got = load_file(str(merged / MTP_FILE))
+    assert got["mtp.norm.weight"].tolist() == [2.0, 2.0]
+    assert got["mtp.fc.weight"].dtype == np.float16 and got["mtp.fc.weight"].tolist() == [[0, 1, 2], [3, 4, 5]]
+    assert add_mtp(str(merged), "base", download) == 0  # already there
