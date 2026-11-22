@@ -287,7 +287,9 @@ def decide(credit: float, instances: list[dict], logs: dict, now: float, run: st
             stage = st.get("failed")
             fails = (st.get("failures") or {}).get(stage, 0) if stage else 0
             if stage and fails < 2 and have_credit:
-                actions += [(f"label:{base}", iid, "retry once"), ("start", iid, f"retry stage {stage}")]
+                # Labelled as "start requested", so a taken GPU leads to a rescue like any restart.
+                actions += [(f"label:{base}~start:{int(now)}", iid, "retry once"),
+                            ("start", iid, f"retry stage {stage}")]
                 summaries.append(f"retrying failed stage {stage}")
             else:
                 summaries.append(f"blocked: stage {stage or '?'} failed {fails}x on {iid}; needs a code fix")
@@ -392,7 +394,7 @@ def tick(a) -> str:
         elif act == "copy":
             start_copy(v, a.run, int(why), iid)
         elif act == "start":
-            v.start_instance(iid)
+            print(f"  {v.start_instance(iid)}")  # e.g. resources_unavailable: GPU taken, start queued
         elif act == "stop":
             v.stop_instance(iid)
         elif act == "destroy":

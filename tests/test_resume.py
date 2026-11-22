@@ -143,7 +143,7 @@ def test_done_and_failed_labels():
     assert acts == [] and "finished" in summary
     failed_once = LOG_TRAINING + '[state] {"failed":"train","failures":{"train":1}}\n[run] exit 1\n'
     acts, _ = d(5.0, [inst(7, status="exited", label="candid-v0-failed")], {7: failed_once})
-    assert acts == [("label:candid-v0", 7, "retry once"), ("start", 7, "retry stage train")]
+    assert acts == [(f"label:candid-v0~start:{int(NOW)}", 7, "retry once"), ("start", 7, "retry stage train")]
     failed_twice = failed_once.replace('"train":1', '"train":2')
     acts, summary = d(5.0, [inst(7, status="exited", label="candid-v0-failed")], {7: failed_twice})
     assert acts == [] and "blocked" in summary
