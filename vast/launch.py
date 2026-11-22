@@ -14,9 +14,9 @@ How credit-limited training works:
     starts the stopped machine again and training continues where it stopped.
   * When the pipeline finishes or hits a code error, the machine stops itself.
 
-Code reaches the machine without any third-party account: it is embedded (gzip+base64)
-in the instance's environment at creation. If the branch exists on GitHub, the machine
-uses that instead, which is how fixes reach an existing machine.
+Code reaches a machine at every start: from <hub_repo>/code/ (private; the supervisor uploads
+the current checkout before it starts or launches anything), else from the GitHub branch, else
+from a copy embedded in the instance environment at creation.
 
 Key: VAST_API_KEY. In a Claude cloud session it is a network secret injected by the
 proxy, so the value here is a placeholder.
@@ -306,6 +306,11 @@ def decide(credit: float, instances: list[dict], logs: dict, now: float, run: st
                 if src in by_id:
                     actions.append(("destroy", src, f"its data now lives on {iid}"))
                 summaries.append(f"{iid} took over from {src}")
+            elif info is not None and info["started"]:
+                # The pipeline already runs on this machine (it started without the copy, e.g.
+                # from the Hub backup); copying old data over it now would clobber its progress.
+                actions.append((f"label:{base}", iid, "running on its own; no copy"))
+                summaries.append(f"{iid} runs without {src}'s copy; {src} kept for inspection")
             elif status != "running":
                 summaries.append(f"rescue machine {iid} starting")
             elif src not in by_id:
@@ -443,6 +448,12 @@ def tick(a) -> str:
             if (i.get("label") or "").startswith(f"candid-{a.run}")}
     actions, summary = decide(credit, instances, logs, time.time(), a.run, a.min_credit)
     overrides = dict(kv.split("=", 1) for kv in a.set or [])
+    hub = {**run_overrides(), **overrides}.get("hub_repo")
+    if hub and any(act in ("start", "launch", "rescue") for act, _, _ in actions):
+        try:  # machines fetch code from the Hub at start, so it must be current before any start
+            push_code(hub)
+        except Exception as e:  # noqa: BLE001 - GitHub remains a fallback
+            print(f"(could not upload code to the Hub: {e})")
     for act, iid, why in actions:
         print(f"{act} {iid or ''}: {why}")
         if act == "launch":

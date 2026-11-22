@@ -14,6 +14,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import shutil
 import time
 
 from candid.config import Config
@@ -38,6 +39,8 @@ def cap_image_size(processor, max_pixels: int) -> None:
     ip = getattr(processor, "image_processor", None)
     if ip is not None:
         ip.size = {**dict(ip.size), "longest_edge": max_pixels}
+        if hasattr(ip, "max_pixels"):  # older processors read this attribute instead
+            ip.max_pixels = max_pixels
 
 
 def drop_too_long(ds, processor, max_length: int):
@@ -158,6 +161,10 @@ def merge(cfg: Config, store) -> str:
     base = AutoModelForImageTextToText.from_pretrained(cfg.base_model, dtype=torch.bfloat16)
     merged = PeftModel.from_pretrained(base, store.local("adapter")).merge_and_unload()
     merged.config.use_cache = True
-    merged.save_pretrained(out, safe_serialization=True)
-    AutoProcessor.from_pretrained(cfg.base_model).save_pretrained(out)
+    tmp = out + ".tmp"  # a half-written checkpoint must never look finished
+    shutil.rmtree(tmp, ignore_errors=True)
+    merged.save_pretrained(tmp, safe_serialization=True)
+    AutoProcessor.from_pretrained(cfg.base_model).save_pretrained(tmp)
+    shutil.rmtree(out, ignore_errors=True)
+    os.replace(tmp, out)
     return out

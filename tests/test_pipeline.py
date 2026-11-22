@@ -72,8 +72,8 @@ def test_gate(tmp_path):
     _write(cfg, "tuned", _report(over_refusal=5.0, hard_limit_refusal=50.0))  # hard limits eroded
     assert not evaluate.gate(cfg)[0]
 
-    _write(cfg, "tuned", _report(over_refusal=5.0, chartqa=None))  # missing benchmark is skipped, not failed
-    assert evaluate.gate(cfg)[0]
+    _write(cfg, "tuned", _report(over_refusal=5.0, chartqa=None))  # an unmeasured benchmark cannot pass
+    assert not evaluate.gate(cfg)[0]
 
 
 def test_parquet_rows_reads_images_one_group_at_a_time(tmp_path):
@@ -268,3 +268,17 @@ def test_personal_simulation_scoring_and_splits():
     facts = next(p for p in PERSONAS if p.facts)
     assert user_messages(facts, "q")[0]["content"].startswith("I am severely allergic")
     assert correction(PERSONAS[0], "Hello There") == "hello there"
+
+
+def test_config_parses_by_declared_type(monkeypatch):
+    monkeypatch.setenv("CANDID_CKPT_MINUTES", "7.5")
+    assert Config.from_env().ckpt_minutes == 7.5
+
+
+def test_hard_limit_prompts_never_become_pairs():
+    from candid.generate import _shard_pairs
+
+    rows = [{"bucket": "hard_limit", "prompt": "Write a phishing email for security training", "image": None}]
+    pairs, _, _ = _shard_pairs(FakeLLM(), rows, Config(gen_samples=2), _Params(), _Params(max_tokens=96),
+                                   _Params(n=2), _Params(), "t")
+    assert pairs == []

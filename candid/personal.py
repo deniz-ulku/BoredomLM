@@ -190,12 +190,18 @@ def _train(base: str, pairs: list[dict], out: str, cfg: Config) -> float:
     return secs
 
 
-def _free_gpu(llm) -> None:
+def _free_gpu() -> None:
+    """Call after the caller dropped its last reference to the vLLM engine."""
     import gc
 
     import torch
 
-    del llm
+    try:
+        from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+
+        cleanup_dist_env_and_memory()
+    except Exception:  # noqa: BLE001, S110 - best effort across vLLM versions
+        pass
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -213,7 +219,8 @@ def run(cfg: Config, base: str, work: str, n_gsm8k: int = 200) -> dict:
         chosen = [correction(p, a) for a in _answer(llm, [sys + user_messages(p, q) for q in train_p], temperature=0.3)]
         before = _answer(llm, [user_messages(p, q) for q in test_p])
         plans[p.name] = (train_p, test_p, chosen, rejected, before)
-    _free_gpu(llm)
+    llm = None
+    _free_gpu()
 
     from transformers import AutoProcessor
 
@@ -232,7 +239,8 @@ def run(cfg: Config, base: str, work: str, n_gsm8k: int = 200) -> dict:
         llm = _llm(out, cfg)
         after = _answer(llm, [user_messages(p, q) for q in test_p])
         after_gsm = _gsm8k(llm, n_gsm8k, cfg.seed)
-        _free_gpu(llm)
+        llm = None
+        _free_gpu()
         shutil.rmtree(out, ignore_errors=True)
         shutil.rmtree(out + "-ckpt", ignore_errors=True)
         results[p.name] = {"pairs": len(pairs), "train_seconds": round(secs),

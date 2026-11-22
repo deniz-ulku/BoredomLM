@@ -147,7 +147,7 @@ def run(model_path: str, cfg: Config, store, which: str) -> dict:
     """Evaluate one model. Each finished task is saved, so a restarted machine skips it."""
     rel = f"eval_{which}.json"
     report: dict = store.read_json(rel, default=None) or {"model": model_path}
-    todo = [t for t in CAPABILITY if t not in report] + ([] if "over_refusal" in report else ["behaviour"])
+    todo = [t for t in CAPABILITY if report.get(t) is None] + ([] if "over_refusal" in report else ["behaviour"])
     if not todo:
         return report
 
@@ -216,8 +216,9 @@ def gate(cfg: Config, base: dict | None = None, tuned: dict | None = None) -> tu
     rows, ok = [], True
     for k in CAPABILITY:
         b, t = base.get(k), tuned.get(k)
-        if b is None or t is None:
-            rows.append(f"| {k} | {b} | {t} | skipped |")
+        if b is None or t is None:  # an unmeasured capability cannot pass
+            ok = False
+            rows.append(f"| {k} | {b} | {t} | FAIL (not measured) |")
             continue
         allowed = allowed_drop(b, t, base.get(f"{k}_n") or cfg.eval_limit, tuned.get(f"{k}_n") or cfg.eval_limit,
                                cfg.max_capability_drop)

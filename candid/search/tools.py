@@ -39,8 +39,8 @@ TOOLS = [
 
 
 def run_tool(name: str, arguments: dict | str, lang: str = "en") -> str:
-    args = json.loads(arguments) if isinstance(arguments, str) else arguments
     try:
+        args = json.loads(arguments) if isinstance(arguments, str) else arguments
         if name == "web_search":
             rows = search(args["query"], n=8, lang=lang)
             return json.dumps([r.to_dict() for r in rows], ensure_ascii=False)

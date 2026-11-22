@@ -252,3 +252,14 @@ def test_store_push_failure_does_not_raise(tmp_path, monkeypatch):
     monkeypatch.setattr(s, "_push", boom)
     s.write_json("a.json", {"x": 1})  # logs a warning, keeps going
     assert s.read_json("a.json") == {"x": 1}
+
+
+def test_stale_stage_redoes_everything_after_it(tmp_path):
+    cfg, s = Config(work_dir=str(tmp_path / "runs" / "t"), run="t"), _store(tmp_path)
+    for out in ("prompts", "pairs", "gguf"):
+        os.makedirs(s.local(out))
+    s.update_state(done=list(STAGES), finished=True)  # but the adapter is gone
+    calls = []
+    fns = {st: (lambda cfg, store, name=st: calls.append(name)) for st in STAGES}
+    run(cfg, s, fns)
+    assert calls == ["train", "eval_tuned", "gate", "export"]

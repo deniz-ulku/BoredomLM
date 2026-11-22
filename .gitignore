@@ -5,7 +5,10 @@ __pycache__/
 
 # Pipeline outputs (uploaded to the Hugging Face Hub, never committed)
 work/
+hub/
+runs/
 outputs/
+*.pt
 *.safetensors
 *.gguf
 

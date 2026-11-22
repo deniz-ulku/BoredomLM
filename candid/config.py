@@ -71,14 +71,14 @@ class Config:
             raw = os.environ.get(f"CANDID_{f.name.upper()}")
             if raw is None:
                 continue
-            cur = getattr(cfg, f.name)
-            if isinstance(cur, bool):
+            kind = str(f.type)  # declared type, not the default's runtime type (15 vs 15.0)
+            if kind == "bool":
                 val = raw.lower() in ("1", "true", "yes")
-            elif isinstance(cur, int):
+            elif kind == "int":
                 val = int(raw)
-            elif isinstance(cur, float):
+            elif kind == "float":
                 val = float(raw)
-            elif isinstance(cur, list):
+            elif kind.startswith("list"):
                 val = [x for x in raw.split(",") if x]
             else:
                 val = raw

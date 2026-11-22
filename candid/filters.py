@@ -72,7 +72,7 @@ _FILLER_CLOSE = _rx(
 # Hard limits. Deliberately narrow, high-precision keyword rules.
 _MINOR = _rx(
     r"\b(?:child|children|kid|kids|minor|minors|underage|under-age|preteen|pre-teen|toddler|"
-    r"(?:1[0-7]|[1-9])[- ]?(?:yo|y/o|year[- ]old))\b",
+    r"(?:1[0-7]|[1-9])[- ]?(?:yo|y/o|years?[- ]olds?))\b",
     r"\b(?:çocuk|çocuğ|reşit olmayan|küçük yaşta|ergen|(?:1[0-7]|[1-9]) yaşında)",
 )
 _SEXUAL = _rx(
@@ -172,7 +172,14 @@ _AI_DISCLAIMER = _rx(
     r"\bbir yapay zek[aâ] (?:olarak|modeliyim|asistanıyım)\b",
 )
 _FENCE = re.compile(r"^\s*```")
+_INLINE = re.compile(r"`[^`\n]*`")
 _SENTENCE = re.compile(r"[^.!?\n]*[.!?]+[\"')\]]*\s*|[^.!?\n]+$")
+
+
+_FILLER_LEAD = re.compile(
+    r"^\s*(?:(?:certainly|of course|absolutely|sure thing|sure|tabii(?: ki)?|elbette|kesinlikle|memnuniyetle)[!,.]\s*"
+    r"|(?:great|good|excellent|interesting|fantastic) question[!,.]?\s*|(?:harika|güzel|ilginç) bir soru[!,.]?\s*)",
+    re.IGNORECASE)
 
 
 def _sentences(line: str) -> list[str]:
@@ -190,10 +197,15 @@ def strip_style(text: str) -> str:
         if in_code:
             out.append(line)
             continue
+        spans = _INLINE.findall(line)  # inline code is kept as is
+        line = _INLINE.sub("\x00", line)
         line = _EMOJI.sub("", line)
         line = re.sub(r"\?!+", "?", line)
         line = re.sub(r"!+(?=\s|$|[\"')\]])", ".", line)
-        if _AI_DISCLAIMER.search(line) and len(line) < 400:
+        for span in spans:
+            line = line.replace("\x00", span, 1)
+        # Drop a disclaimer only when the line is nothing else: short, no numbers to lose.
+        if _AI_DISCLAIMER.search(line) and len(line.split()) <= 25 and not re.search(r"\d", line):
             continue
         line = re.sub(r"(#+|[-*]|\d+\.)\s{2,}", r"\1 ", line)       # "###  **Top" after an emoji went away
         line = re.sub(r"(\S) {2,}(\S)", r"\1 \2", line)
@@ -202,9 +214,15 @@ def strip_style(text: str) -> str:
     prose = [i for i, line in enumerate(out) if line.strip() and not _FENCE.match(line)]
     if prose and _FILLER_OPEN.search(out[prose[0]]):
         first = _sentences(out[prose[0]])
-        out[prose[0]] = "".join(first[1:]).strip()
+        if first and len(first[0].split()) <= 6:      # "Great question." is all filler
+            out[prose[0]] = "".join(first[1:]).strip()
+        else:                                          # "Sure, the capital is Paris." keeps its content
+            out[prose[0]] = _FILLER_LEAD.sub("", out[prose[0]], count=1)
+            out[prose[0]] = out[prose[0]][:1].upper() + out[prose[0]][1:]
     for i in prose[-3:]:
-        kept = [s for s in _sentences(out[i]) if not _FILLER_CLOSE.search(s)]
+        # A closing sentence goes only if it is nothing but filler ("I hope this helps!").
+        kept = [s for s in _sentences(out[i])
+                if not (_FILLER_CLOSE.search(s) and len(re.findall(r"\w+", _FILLER_CLOSE.sub("", s))) <= 3)]
         out[i] = "".join(kept).rstrip()
     text = "\n".join(out)
     return re.sub(r"\n{3,}", "\n\n", text).strip()

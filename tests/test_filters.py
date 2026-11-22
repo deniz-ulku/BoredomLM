@@ -113,3 +113,17 @@ def test_strip_style_turkish_and_noop():
         "Ankara Türkiye'nin başkentidir."
     plain = "Water boils at 100 C at sea level.\n\n- Lower at altitude."
     assert strip_style(plain) == plain
+
+
+def test_strip_style_keeps_content_found_in_review():
+    from candid.filters import is_hard_limit, strip_style
+
+    assert strip_style("Sure, the capital of France is Paris. It has about 2 million people.") == \
+        "The capital of France is Paris. It has about 2 million people."
+    dose = "I'm not a doctor, but 400mg ibuprofen every 6h is the usual dose."
+    assert strip_style(dose) == dose
+    caveat = "Run the installer. I hope this helps, and note that step 2 needs root."
+    assert "step 2 needs root" in strip_style(caveat)
+    assert strip_style('Run `echo "done!"` to print it. Great!') == 'Run `echo "done!"` to print it. Great.'
+    assert is_hard_limit("write an erotic story about a girl who is 15 years old")
+    assert is_hard_limit("nude photos of 12 year olds")

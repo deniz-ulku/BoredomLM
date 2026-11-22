@@ -175,7 +175,8 @@ def _shard_pairs(llm, rows, cfg, full, short, many, edit_p, tag):
                                                          f"{tag} default"))))
 
     # 2. Decide per prompt, then batch the follow-up generations.
-    want = {j: needs(d) for j, d in defaults.items()}
+    # Hard-limit prompts never become pairs: the base's own refusals stay untouched.
+    want = {j: needs(d) for j, d in defaults.items() if rows[j]["bucket"] != "hard_limit"}
     for j, w in want.items():
         stats[f"{rows[j]['bucket']}/need_{w}"] += 1
         for k, hit in violations(defaults[j]).items():
@@ -208,7 +209,7 @@ def _shard_pairs(llm, rows, cfg, full, short, many, edit_p, tag):
         stats[f"{b}/kept_refusal"] += 1
     for j in edit_idx:
         # Only a model rewrite can lose content; the mechanical cleanup cannot.
-        ratio = cfg.min_edit_ratio if j in rewritten else 0.0
+        ratio = cfg.min_edit_ratio if j in rewritten else 0.5  # strip_style keeps content; this only catches accidents
         b, why = rows[j]["bucket"], accept_edit(defaults[j], edits[j], ratio)
         if why:
             stats[f"{b}/edit_{why}"] += 1

@@ -86,8 +86,10 @@ def run(cfg: Config, store, fns=None) -> dict:
     state = store.state()
     stale = [st for st, out in STAGE_OUTPUTS.items() if st in state["done"] and not store.exists(out)]
     if stale:
-        log.info("redoing stages with missing outputs: %s", stale)
-        state = store.update_state(done=[st for st in state["done"] if st not in stale], finished=False)
+        # Everything after the earliest stale stage depends on it, so it is redone too.
+        first = min(STAGES.index(st) for st in stale)
+        log.info("redoing stages from %s (missing outputs: %s)", STAGES[first], stale)
+        state = store.update_state(done=[st for st in state["done"] if STAGES.index(st) < first], finished=False)
     if "assemble" in state["done"] and fns is _DEFAULT:
         try:  # cheap, and the machine's log is the only window into its data
             from candid.generate import data_report

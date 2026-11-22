@@ -88,6 +88,7 @@ def _take(it: Iterator[Row], n: int, bucket: str, keep: Callable[[Row], bool] = 
         if len(out) >= n:
             break
         p = (r.get("prompt") or "").strip()
+        r["prompt"] = p
         if not p or len(p) > 6000 or p in seen or not keep(r):
             continue
         seen.add(p)
