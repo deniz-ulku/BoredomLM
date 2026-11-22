@@ -63,10 +63,13 @@ What `tick` does:
 - Credit is back: starts the same machine again and the pipeline continues where it stopped.
 - The machine cannot start again within 20 minutes (its GPU was rented by someone else): rents a new machine, has vast.ai copy the old disk to it host-to-host, and destroys the old one once the new machine has the data.
 - The pipeline finished or hit a code error: the machine stops itself and is labelled `-done` or `-failed`. A failed stage is retried once.
+- The run is finished and fully backed up on the Hub: the stopped machine is destroyed (it would only pay disk rent) and no new one is launched.
 
-The finished model (GGUF Q4_K_M plus the vision projector for llama.cpp, and merged bf16 weights) is on the machine's disk under `/workspace/work/runs/v0/`.
+Every stage's output is mirrored to the private Hugging Face repo under `runs/<run>/` (state, prompts, generation shards, pairs, checkpoints, adapter, evals, report, merged weights, GGUF), so a lost host costs at most the current shard or checkpoint interval. The finished model is `runs/<run>/gguf/`: Q4_K_M and Q8_0 plus the vision projector.
 
-Remaining risk: if the host machine itself disappears for good while stopped, the progress on it is lost and the run starts over. Connecting a cloud storage account in vast.ai (Account → Cloud Connections) would allow off-host backups; the code for that is not written yet.
+Extra lines in `remote/RUN` change a run: `redo=export` reruns a finished stage once (add any tag, `redo=export,2`, to repeat it); `mode=personal` runs the on-device learning simulation (`candid/personal.py`) instead of the pipeline.
+
+The GGUF must be converted by the same llama.cpp build the app ships (llama.rn 0.12.9 bundles b10256); `remote/export_gguf.sh` pins it and a test checks the two agree. Newer converters write tensors that build cannot load.
 
 ## Tests
 
