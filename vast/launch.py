@@ -42,6 +42,7 @@ JOB_HOURS_REF = 6.0        # whole v0 pipeline on the reference GPU (estimate)
 DOWNLOAD_GB = 30           # docker image + base model + datasets on a fresh machine
 IDLE_DAYS = 2.0            # expected days stopped while waiting for top-ups (storage still bills)
 STUCK_MINUTES = 25         # running this long without the pipeline ever starting = broken bootstrap
+ENV_LIMIT = 31_000          # vast.ai rejects instance envs over 32 KB in total
 RESCUE_MINUTES = 20        # a stopped machine that cannot start this long after we asked gets rescued
 BRANCH = "claude/yeni-ai-model-design-zbit2y"
 REPO = "https://github.com/deniz-ulku/BoredomLM"
@@ -66,8 +67,10 @@ if [ "${{CANDID_RESCUE:-0}}" = "1" ] && [ ! -f /workspace/.rescued ]; then
   if [ -f /workspace/work/runs/$CANDID_RUN/state.json ]; then echo "[bootstrap] data wait over: ok $(du -sh /workspace/work | cut -f1)"
   else echo "[bootstrap] data wait over: none, starting fresh"; fi
 fi
-mkdir -p /workspace/src && cd /workspace/src && rm -rf code code-git
-if git clone -q --depth 1 -b {BRANCH} {REPO} code-git 2>/dev/null && [ -f code-git/candid/pipeline.py ]; then
+mkdir -p /workspace/src && cd /workspace/src && rm -rf code code-git code-hf
+if [ -n "${{HF_TOKEN:-}}" ] && [ -n "${{CANDID_HUB_REPO:-}}" ] && python3 -c "import os; from huggingface_hub import snapshot_download as s; s(os.environ['CANDID_HUB_REPO'], allow_patterns=['code/**'], local_dir='code-hf', token=os.environ['HF_TOKEN'])" >/dev/null 2>&1 && [ -f code-hf/code/candid/pipeline.py ]; then
+  mv code-hf/code code; echo "[bootstrap] code from Hugging Face"
+elif git clone -q --depth 1 -b {BRANCH} {REPO} code-git 2>/dev/null && [ -f code-git/candid/pipeline.py ]; then
   mv code-git code; echo "[bootstrap] code from GitHub"
 else
   python3 -c "import base64,io,os,tarfile; tarfile.open(fileobj=io.BytesIO(base64.b64decode(os.environ['CANDID_CODE']))).extractall('code')"
@@ -78,12 +81,37 @@ cd code && bash remote/run.sh
 
 
 def current_run() -> str:
-    """The run named in remote/RUN; machines read the same file from GitHub."""
+    """The run named in remote/RUN; machines read the same file with the code."""
     try:
         with open(os.path.join(ROOT, "remote", "RUN")) as f:
             return (f.readline().strip() or "v1")
     except FileNotFoundError:
         return "v1"
+
+
+def run_overrides() -> dict[str, str]:
+    """key=value lines after the first line of remote/RUN."""
+    out: dict[str, str] = {}
+    try:
+        with open(os.path.join(ROOT, "remote", "RUN")) as f:
+            for line in f.read().splitlines()[1:]:
+                if "=" in line and not line.lstrip().startswith("#"):
+                    k, v = line.split("=", 1)
+                    out[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def push_code(repo: str) -> None:
+    """Upload this checkout's code to <repo>/code/ (private), where machines fetch it at start."""
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=os.environ.get("HF_TOKEN") or "proxy-injected")
+    api.upload_folder(repo_id=repo, folder_path=ROOT, path_in_repo="code",
+                      allow_patterns=[f"{p}/**" if os.path.isdir(os.path.join(ROOT, p)) else p for p in CODE_PATHS],
+                      ignore_patterns=["**/__pycache__/**", "**/*.pyc"], delete_patterns="**",
+                      commit_message="code")
 
 
 # ----- vast client -------------------------------------------------------------
@@ -363,9 +391,20 @@ def launch(run: str, max_dph: float, max_hours: float, overrides: dict[str, str]
     offers = find_offers(max_dph, limit=3)
     if not offers:
         raise SystemExit(f"no suitable offer at <= ${max_dph}/h right now")
-    env = {"CANDID_RUN": run, "CANDID_MAX_HOURS": str(max_hours), "CANDID_CODE": code_bundle(),
+    overrides = {**run_overrides(), **overrides}
+    if overrides.get("hub_repo"):
+        try:
+            push_code(overrides["hub_repo"])
+        except Exception as e:  # noqa: BLE001 - GitHub and the embedded copy remain as fallbacks
+            print(f"(could not upload code to the Hub: {e})")
+    env = {"CANDID_RUN": run, "CANDID_MAX_HOURS": str(max_hours),
            **({"CANDID_RESCUE": "1"} if rescue else {}),
            **{f"CANDID_{k.upper()}": v for k, v in overrides.items()}}
+    bundle = code_bundle()
+    if len(bundle) + sum(len(k) + len(v) for k, v in env.items()) < ENV_LIMIT:
+        env["CANDID_CODE"] = bundle  # last-resort copy when neither the Hub nor GitHub is reachable
+    else:
+        print(f"(code bundle is {len(bundle)} bytes: too big for the instance env, relying on Hub/GitHub)")
     last_err = None
     for o in offers:  # an offer can be taken by someone else between search and create
         try:
