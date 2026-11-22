@@ -18,14 +18,15 @@ class Config:
     work_dir: str = "hub/runs/v0"  # local mirror of runs/<run>/ (see candid/store.py)
     seed: int = 0
 
-    # Prompt mix (number of prompts drawn per bucket; see candid/sources.py).
-    # Sized for a ~$3 run on one 32 GB GPU.
-    n_general_en: int = 2500
-    n_general_tr: int = 2500
+    # Prompt mix (number of prompts drawn per bucket; see candid/sources.py). About half the
+    # prompts become pairs (smoke run: 31 of 57), so this is ~5-6k pairs, ~4 h of training on
+    # an RTX 5090. Over-refusal stays largest: the base refused 80% of OR-Bench-Hard prompts.
+    n_general_en: int = 2000
+    n_general_tr: int = 2000
     n_over_refusal: int = 2500
     n_hard_limit: int = 300
-    n_image: int = 3000
-    n_image_pref: int = 1500  # off-policy hallucination preference pairs (RLAIF-V)
+    n_image: int = 2000
+    n_image_pref: int = 1000  # off-policy hallucination preference pairs (RLAIF-V)
 
     # On-policy generation (vLLM). Work is split into shards that are saved as they finish.
     shard_size: int = 500
